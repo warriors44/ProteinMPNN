@@ -375,7 +375,9 @@ def main(args: argparse.Namespace) -> None:
                     scaler.scale(loss_elbo).backward()
                     if args.gradient_norm > 0.0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_norm)
-                    scaler.step(optimizer.optimizer)
+                    # Use NoamOpt wrapper here so its step() (with learning rate
+                    # schedule) is invoked, matching training/training.py.
+                    scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss_elbo, info = model.compute_elbo(

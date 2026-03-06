@@ -636,10 +636,14 @@ class ProteinMPNN_LO(nn.Module):
         # Fixed/padded positions get very HIGH scores so topk selects them
         # first (= earliest ranks = "already decoded").
         # Designable positions get Gumbel-perturbed q_logits (finite).
+        # NOTE: The "high" constant must be representable in the current dtype
+        # (e.g. float16 under mixed precision), so we derive it from finfo
+        # instead of hard-coding something like 1e9 which would overflow.
+        high_val = torch.finfo(q_logits.dtype).max / 10.0
         scores = torch.where(
             design_mask.bool(),
             q_logits + gumbel_noise,
-            torch.full_like(q_logits, 1e9) + torch.rand_like(q_logits),
+            torch.full_like(q_logits, high_val) + torch.rand_like(q_logits),
         )
         _, full_perm = scores.topk(N, dim=-1)
         return full_perm
