@@ -7,10 +7,10 @@ import numpy as np
 import json
 
 
-def softmax(x, T):
+def softmax(x: np.ndarray, T: float) -> np.ndarray:
     return np.exp(x/T)/np.sum(np.exp(x/T), -1, keepdims=True)
 
-def parse_pssm(path):
+def parse_pssm(path: str) -> np.ndarray:
     data = pd.read_csv(path, skiprows=2)
     floats_list_list = []
     for i in range(data.values.shape[0]):
@@ -40,7 +40,7 @@ pssm_probs = np_lines[:,20:40] @ permutation_matrix
 
 X_mask = np.concatenate([np.zeros([1,20]), np.ones([1,1])], -1)
 
-def softmax(x, T):
+def softmax(x: np.ndarray, T: float) -> np.ndarray:
     return np.exp(x/T)/np.sum(np.exp(x/T), -1, keepdims=True)
 
 #Load parsed PDBs:  

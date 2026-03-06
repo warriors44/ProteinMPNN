@@ -4,13 +4,15 @@ from pdbx.reader.PdbxContainers import DataCategory
 import gzip
 import numpy as np
 import torch
-import os,sys
+import os
+import sys
 import glob
 import re
 from scipy.spatial import KDTree
-from itertools import combinations,permutations
+from itertools import combinations, permutations
 import tempfile
 import subprocess
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 RES_NAMES = [
     'ALA','ARG','ASN','ASP','CYS',
@@ -54,7 +56,7 @@ aa2idx = {(r,a):i for r,atoms in zip(RES_NAMES,ATOM_NAMES)
 aa2idx.update({(r,'OXT'):3 for r in RES_NAMES})
 
 
-def writepdb(f, xyz, seq, bfac=None):
+def writepdb(f: Any, xyz: np.ndarray, seq: str, bfac: Optional[np.ndarray] = None) -> np.ndarray:
 
     #f = open(filename,"w")
     f.seek(0)
@@ -89,7 +91,7 @@ def writepdb(f, xyz, seq, bfac=None):
     return np.array(idx)
 
 
-def TMalign(chainA, chainB):
+def TMalign(chainA: Dict[str, Any], chainB: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     
     # temp files to save the two input protein chains 
     # and TMalign transformation
@@ -112,7 +114,7 @@ def TMalign(chainA, chainB):
     
     # if TMalign failed
     if len(stderr) > 0:
-        return None,None
+        return None, None
 
     # parse transformation
     mtx.seek(0)
@@ -153,7 +155,7 @@ def TMalign(chainA, chainB):
     return resAB,resBA
 
 
-def get_tm_pairs(chains):
+def get_tm_pairs(chains: Dict[str, Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
     """run TM-align for all pairs of chains"""
 
     tm_pairs = {}
@@ -175,7 +177,7 @@ def get_tm_pairs(chains):
         
 
 
-def parseOperationExpression(expression) :
+def parseOperationExpression(expression: str) -> List[str]:
 
     expression = expression.strip('() ')
     operations = []
@@ -192,7 +194,7 @@ def parseOperationExpression(expression) :
     return operations
 
 
-def parseAssemblies(data,chids):
+def parseAssemblies(data: Any, chids: Sequence[str]) -> Dict[str, Any]:
 
     xforms =  {'asmb_chains'  : None, 
                'asmb_details' : None, 
@@ -261,7 +263,7 @@ def parseAssemblies(data,chids):
     return xforms
 
 
-def parse_mmcif(filename):
+def parse_mmcif(filename: str) -> Dict[str, Any]:
 
     #print(filename)
     

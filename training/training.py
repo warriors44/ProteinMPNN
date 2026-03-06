@@ -1,8 +1,12 @@
 import argparse
 import os.path
 
-def main(args):
-    import json, time, os, sys, glob
+def main(args: argparse.Namespace) -> None:
+    import glob
+    import json
+    import os
+    import sys
+    import time
     import shutil
     import warnings
     import numpy as np
@@ -14,7 +18,6 @@ def main(args):
     import torch.nn as nn
     import torch.nn.functional as F
     import random
-    import os.path
     import subprocess
     from concurrent.futures import ProcessPoolExecutor    
     from utils import worker_init_fn, get_pdbs, loader_pdb, build_training_clusters, PDB_dataset, StructureDataset, StructureLoader

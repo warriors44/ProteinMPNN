@@ -1,6 +1,6 @@
 import argparse
 
-def main(args):
+def main(args: argparse.Namespace) -> None:
     import json
     import numpy as np
     with open(args.jsonl_input_path, 'r') as json_file:

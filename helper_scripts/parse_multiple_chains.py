@@ -1,9 +1,12 @@
 import argparse
 
-def main(args):
+def main(args: argparse.Namespace) -> None:
 
     import numpy as np
-    import os, time, gzip, json
+    import gzip
+    import json
+    import os
+    import time
     import glob 
     
     folder_with_pdbs_path = args.input_path

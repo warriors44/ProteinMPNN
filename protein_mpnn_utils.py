@@ -1,6 +1,12 @@
 from __future__ import print_function
-import json, time, os, sys, glob
+import json
+import time
+import os
+import sys
+import glob
 import shutil
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+
 import numpy as np
 import torch
 from torch import optim
@@ -15,7 +21,7 @@ import itertools
 
 #A number of functions/classes are adopted from: https://github.com/jingraham/neurips19-graph-protein-design
 
-def parse_fasta(filename,limit=-1, omit=[]):
+def parse_fasta(filename: str, limit: int = -1, omit: Sequence[str] = []) -> Tuple[np.ndarray, np.ndarray]:
     header = []
     sequence = []
     lines = open(filename, "r")
@@ -36,7 +42,7 @@ def parse_fasta(filename,limit=-1, omit=[]):
     sequence = [''.join(seq) for seq in sequence]
     return np.array(header), np.array(sequence)
 
-def _scores(S, log_probs, mask):
+def _scores(S: torch.Tensor, log_probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """ Negative log probabilities """
     criterion = torch.nn.NLLLoss(reduction='none')
     loss = criterion(
@@ -46,12 +52,12 @@ def _scores(S, log_probs, mask):
     scores = torch.sum(loss * mask, dim=-1) / torch.sum(mask, dim=-1)
     return scores
 
-def _S_to_seq(S, mask):
+def _S_to_seq(S: torch.Tensor, mask: torch.Tensor) -> str:
     alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
     seq = ''.join([alphabet[c] for c, m in zip(S.tolist(), mask.tolist()) if m > 0])
     return seq
 
-def parse_PDB_biounits(x, atoms=['N','CA','C'], chain=None):
+def parse_PDB_biounits(x: str, atoms: Sequence[str] = ['N','CA','C'], chain: Optional[str] = None) -> Tuple[Any, Any]:
   '''
   input:  x = PDB filename
           atoms = atoms to extract (optional)
@@ -69,13 +75,13 @@ def parse_PDB_biounits(x, atoms=['N','CA','C'], chain=None):
   aa_1_3 = {a:b for a,b in zip(alpha_1,alpha_3)}
   aa_3_1 = {b:a for a,b in zip(alpha_1,alpha_3)}
   
-  def AA_to_N(x):
+  def AA_to_N(x: Any) -> List[List[int]]:
     # ["ARND"] -> [[0,1,2,3]]
     x = np.array(x);
     if x.ndim == 0: x = x[None]
     return [[aa_1_N.get(a, states-1) for a in y] for y in x]
   
-  def N_to_AA(x):
+  def N_to_AA(x: Any) -> List[str]:
     # [[0,1,2,3]] -> ["ARND"]
     x = np.array(x);
     if x.ndim == 1: x = x[None]
@@ -136,7 +142,7 @@ def parse_PDB_biounits(x, atoms=['N','CA','C'], chain=None):
   except TypeError:
       return 'no_chain', 'no_chain'
 
-def parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False):
+def parse_PDB(path_to_pdb: str, input_chain_list: Optional[Sequence[str]] = None, ca_only: bool = False) -> List[Dict[str, Any]]:
     c=0
     pdb_dict_list = []
     init_alphabet = ['A', 'B', 'C', 'D', 'E', 'F', 'G','H', 'I', 'J','K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T','U', 'V','W','X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g','h', 'i', 'j','k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't','u', 'v','w','x', 'y', 'z']
@@ -188,7 +194,38 @@ def parse_PDB(path_to_pdb, input_chain_list=None, ca_only=False):
 
 
 
-def tied_featurize(batch, device, chain_dict, fixed_position_dict=None, omit_AA_dict=None, tied_positions_dict=None, pssm_dict=None, bias_by_res_dict=None, ca_only=False):
+def tied_featurize(
+    batch: Sequence[Dict[str, Any]],
+    device: torch.device,
+    chain_dict: Optional[Dict[str, Any]],
+    fixed_position_dict: Optional[Dict[str, Any]] = None,
+    omit_AA_dict: Optional[Dict[str, Any]] = None,
+    tied_positions_dict: Optional[Dict[str, Any]] = None,
+    pssm_dict: Optional[Dict[str, Any]] = None,
+    bias_by_res_dict: Optional[Dict[str, Any]] = None,
+    ca_only: bool = False,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    np.ndarray,
+    torch.Tensor,
+    torch.Tensor,
+    List[List[str]],
+    List[List[str]],
+    List[List[str]],
+    List[List[int]],
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    List[Any],
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """ Pack and pad batch into torch tensors """
     alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
     B = len(batch)
@@ -437,7 +474,7 @@ def tied_featurize(batch, device, chain_dict, fixed_position_dict=None, omit_AA_
 
 
 
-def loss_nll(S, log_probs, mask):
+def loss_nll(S: torch.Tensor, log_probs: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """ Negative log probabilities """
     criterion = torch.nn.NLLLoss(reduction='none')
     loss = criterion(
@@ -447,7 +484,7 @@ def loss_nll(S, log_probs, mask):
     return loss, loss_av
 
 
-def loss_smoothed(S, log_probs, mask, weight=0.1):
+def loss_smoothed(S: torch.Tensor, log_probs: torch.Tensor, mask: torch.Tensor, weight: float = 0.1) -> Tuple[torch.Tensor, torch.Tensor]:
     """ Negative log probabilities """
     S_onehot = torch.nn.functional.one_hot(S, 21).float()
 
@@ -460,8 +497,14 @@ def loss_smoothed(S, log_probs, mask, weight=0.1):
     return loss, loss_av
 
 class StructureDataset():
-    def __init__(self, jsonl_file, verbose=True, truncate=None, max_length=100,
-        alphabet='ACDEFGHIKLMNPQRSTVWYX-'):
+    def __init__(
+        self,
+        jsonl_file: str,
+        verbose: bool = True,
+        truncate: Optional[int] = None,
+        max_length: int = 100,
+        alphabet: str = 'ACDEFGHIKLMNPQRSTVWYX-',
+    ) -> None:
         alphabet_set = set([a for a in alphabet])
         discard_count = {
             'bad_chars': 0,
@@ -507,16 +550,22 @@ class StructureDataset():
                     print('{} entries ({} loaded) in {:.1f} s'.format(len(self.data), i+1, elapsed))
             if verbose:
                 print('discarded', discard_count)
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.data[idx]
     
 
 class StructureDatasetPDB():
-    def __init__(self, pdb_dict_list, verbose=True, truncate=None, max_length=100,
-        alphabet='ACDEFGHIKLMNPQRSTVWYX-'):
+    def __init__(
+        self,
+        pdb_dict_list: Sequence[Dict[str, Any]],
+        verbose: bool = True,
+        truncate: Optional[int] = None,
+        max_length: int = 100,
+        alphabet: str = 'ACDEFGHIKLMNPQRSTVWYX-',
+    ) -> None:
         alphabet_set = set([a for a in alphabet])
         discard_count = {
             'bad_chars': 0,
@@ -548,17 +597,23 @@ class StructureDatasetPDB():
                 elapsed = time.time() - start
 
             #print('Discarded', discard_count)
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.data[idx]
 
 
     
 class StructureLoader():
-    def __init__(self, dataset, batch_size=100, shuffle=True,
-        collate_fn=lambda x:x, drop_last=False):
+    def __init__(
+        self,
+        dataset: Any,
+        batch_size: int = 100,
+        shuffle: bool = True,
+        collate_fn: Any = lambda x:x,
+        drop_last: bool = False,
+    ) -> None:
         self.dataset = dataset
         self.size = len(dataset)
         self.lengths = [len(dataset[i]['seq']) for i in range(self.size)]
@@ -580,10 +635,10 @@ class StructureLoader():
             clusters.append(batch)
         self.clusters = clusters
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.clusters)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[List[Dict[str, Any]]]:
         np.random.shuffle(self.clusters)
         for b_idx in self.clusters:
             batch = [self.dataset[i] for i in b_idx]
@@ -592,13 +647,13 @@ class StructureLoader():
             
             
 # The following gather functions
-def gather_edges(edges, neighbor_idx):
+def gather_edges(edges: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Tensor:
     # Features [B,N,N,C] at Neighbor indices [B,N,K] => Neighbor features [B,N,K,C]
     neighbors = neighbor_idx.unsqueeze(-1).expand(-1, -1, -1, edges.size(-1))
     edge_features = torch.gather(edges, 2, neighbors)
     return edge_features
 
-def gather_nodes(nodes, neighbor_idx):
+def gather_nodes(nodes: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Tensor:
     # Features [B,N,C] at Neighbor indices [B,N,K] => [B,N,K,C]
     # Flatten and expand indices per batch [B,N,K] => [B,NK] => [B,NK,C]
     neighbors_flat = neighbor_idx.view((neighbor_idx.shape[0], -1))
@@ -608,20 +663,27 @@ def gather_nodes(nodes, neighbor_idx):
     neighbor_features = neighbor_features.view(list(neighbor_idx.shape)[:3] + [-1])
     return neighbor_features
 
-def gather_nodes_t(nodes, neighbor_idx):
+def gather_nodes_t(nodes: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Tensor:
     # Features [B,N,C] at Neighbor index [B,K] => Neighbor features[B,K,C]
     idx_flat = neighbor_idx.unsqueeze(-1).expand(-1, -1, nodes.size(2))
     neighbor_features = torch.gather(nodes, 1, idx_flat)
     return neighbor_features
 
-def cat_neighbors_nodes(h_nodes, h_neighbors, E_idx):
+def cat_neighbors_nodes(h_nodes: torch.Tensor, h_neighbors: torch.Tensor, E_idx: torch.Tensor) -> torch.Tensor:
     h_nodes = gather_nodes(h_nodes, E_idx)
     h_nn = torch.cat([h_neighbors, h_nodes], -1)
     return h_nn
 
 
 class EncLayer(nn.Module):
-    def __init__(self, num_hidden, num_in, dropout=0.1, num_heads=None, scale=30):
+    def __init__(
+        self,
+        num_hidden: int,
+        num_in: int,
+        dropout: float = 0.1,
+        num_heads: Optional[int] = None,
+        scale: float = 30,
+    ) -> None:
         super(EncLayer, self).__init__()
         self.num_hidden = num_hidden
         self.num_in = num_in
@@ -642,7 +704,14 @@ class EncLayer(nn.Module):
         self.act = torch.nn.GELU()
         self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
 
-    def forward(self, h_V, h_E, E_idx, mask_V=None, mask_attend=None):
+    def forward(
+        self,
+        h_V: torch.Tensor,
+        h_E: torch.Tensor,
+        E_idx: torch.Tensor,
+        mask_V: Optional[torch.Tensor] = None,
+        mask_attend: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """ Parallel computation of full transformer layer """
 
         h_EV = cat_neighbors_nodes(h_V, h_E, E_idx)
@@ -669,7 +738,14 @@ class EncLayer(nn.Module):
 
 
 class DecLayer(nn.Module):
-    def __init__(self, num_hidden, num_in, dropout=0.1, num_heads=None, scale=30):
+    def __init__(
+        self,
+        num_hidden: int,
+        num_in: int,
+        dropout: float = 0.1,
+        num_heads: Optional[int] = None,
+        scale: float = 30,
+    ) -> None:
         super(DecLayer, self).__init__()
         self.num_hidden = num_hidden
         self.num_in = num_in
@@ -685,7 +761,13 @@ class DecLayer(nn.Module):
         self.act = torch.nn.GELU()
         self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
 
-    def forward(self, h_V, h_E, mask_V=None, mask_attend=None):
+    def forward(
+        self,
+        h_V: torch.Tensor,
+        h_E: torch.Tensor,
+        mask_V: Optional[torch.Tensor] = None,
+        mask_attend: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """ Parallel computation of full transformer layer """
 
         # Concatenate h_V_i to h_E_ij
@@ -711,24 +793,24 @@ class DecLayer(nn.Module):
 
 
 class PositionWiseFeedForward(nn.Module):
-    def __init__(self, num_hidden, num_ff):
+    def __init__(self, num_hidden: int, num_ff: int) -> None:
         super(PositionWiseFeedForward, self).__init__()
         self.W_in = nn.Linear(num_hidden, num_ff, bias=True)
         self.W_out = nn.Linear(num_ff, num_hidden, bias=True)
         self.act = torch.nn.GELU()
-    def forward(self, h_V):
+    def forward(self, h_V: torch.Tensor) -> torch.Tensor:
         h = self.act(self.W_in(h_V))
         h = self.W_out(h)
         return h
 
 class PositionalEncodings(nn.Module):
-    def __init__(self, num_embeddings, max_relative_feature=32):
+    def __init__(self, num_embeddings: int, max_relative_feature: int = 32) -> None:
         super(PositionalEncodings, self).__init__()
         self.num_embeddings = num_embeddings
         self.max_relative_feature = max_relative_feature
         self.linear = nn.Linear(2*max_relative_feature+1+1, num_embeddings)
 
-    def forward(self, offset, mask):
+    def forward(self, offset: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         d = torch.clip(offset + self.max_relative_feature, 0, 2*self.max_relative_feature)*mask + (1-mask)*(2*self.max_relative_feature+1)
         d_onehot = torch.nn.functional.one_hot(d, 2*self.max_relative_feature+1+1)
         E = self.linear(d_onehot.float())
@@ -737,8 +819,16 @@ class PositionalEncodings(nn.Module):
 
 
 class CA_ProteinFeatures(nn.Module):
-    def __init__(self, edge_features, node_features, num_positional_embeddings=16,
-        num_rbf=16, top_k=30, augment_eps=0., num_chain_embeddings=16):
+    def __init__(
+        self,
+        edge_features: int,
+        node_features: int,
+        num_positional_embeddings: int = 16,
+        num_rbf: int = 16,
+        top_k: int = 30,
+        augment_eps: float = 0.,
+        num_chain_embeddings: int = 16,
+    ) -> None:
         """ Extract protein features """
         super(CA_ProteinFeatures, self).__init__()
         self.edge_features = edge_features
@@ -758,7 +848,7 @@ class CA_ProteinFeatures(nn.Module):
         self.norm_edges = nn.LayerNorm(edge_features)
 
 
-    def _quaternions(self, R):
+    def _quaternions(self, R: torch.Tensor) -> torch.Tensor:
         """ Convert a batch of 3D rotations [R] to quaternions [Q]
             R [...,3,3]
             Q [...,4]
@@ -786,7 +876,7 @@ class CA_ProteinFeatures(nn.Module):
         Q = F.normalize(Q, dim=-1)
         return Q
 
-    def _orientations_coarse(self, X, E_idx, eps=1e-6):
+    def _orientations_coarse(self, X: torch.Tensor, E_idx: torch.Tensor, eps: float = 1e-6) -> Tuple[torch.Tensor, torch.Tensor]:
         dX = X[:,1:,:] - X[:,:-1,:]
         dX_norm = torch.norm(dX,dim=-1)
         dX_mask = (3.6<dX_norm) & (dX_norm<4.0) #exclude CA-CA jumps
@@ -836,7 +926,7 @@ class CA_ProteinFeatures(nn.Module):
 
 
 
-    def _dist(self, X, mask, eps=1E-6):
+    def _dist(self, X: torch.Tensor, mask: torch.Tensor, eps: float = 1E-6) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """ Pairwise euclidean distances """
         # Convolutional network on NCHW
         mask_2D = torch.unsqueeze(mask,1) * torch.unsqueeze(mask,2)
@@ -850,7 +940,7 @@ class CA_ProteinFeatures(nn.Module):
         mask_neighbors = gather_edges(mask_2D.unsqueeze(-1), E_idx)
         return D_neighbors, E_idx, mask_neighbors
 
-    def _rbf(self, D):
+    def _rbf(self, D: torch.Tensor) -> torch.Tensor:
         # Distance radial basis function
         device = D.device
         D_min, D_max, D_count = 2., 22., self.num_rbf
@@ -861,13 +951,13 @@ class CA_ProteinFeatures(nn.Module):
         RBF = torch.exp(-((D_expand - D_mu) / D_sigma)**2)
         return RBF
 
-    def _get_rbf(self, A, B, E_idx):
+    def _get_rbf(self, A: torch.Tensor, B: torch.Tensor, E_idx: torch.Tensor) -> torch.Tensor:
         D_A_B = torch.sqrt(torch.sum((A[:,:,None,:] - B[:,None,:,:])**2,-1) + 1e-6) #[B, L, L]
         D_A_B_neighbors = gather_edges(D_A_B[:,:,:,None], E_idx)[:,:,:,0] #[B,L,K]
         RBF_A_B = self._rbf(D_A_B_neighbors)
         return RBF_A_B
 
-    def forward(self, Ca, mask, residue_idx, chain_labels):
+    def forward(self, Ca: torch.Tensor, mask: torch.Tensor, residue_idx: torch.Tensor, chain_labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """ Featurize coordinates as an attributed graph """
         if self.augment_eps > 0:
             Ca = Ca + self.augment_eps * torch.randn_like(Ca)
@@ -918,8 +1008,16 @@ class CA_ProteinFeatures(nn.Module):
 
 
 class ProteinFeatures(nn.Module):
-    def __init__(self, edge_features, node_features, num_positional_embeddings=16,
-        num_rbf=16, top_k=30, augment_eps=0., num_chain_embeddings=16):
+    def __init__(
+        self,
+        edge_features: int,
+        node_features: int,
+        num_positional_embeddings: int = 16,
+        num_rbf: int = 16,
+        top_k: int = 30,
+        augment_eps: float = 0.,
+        num_chain_embeddings: int = 16,
+    ) -> None:
         """ Extract protein features """
         super(ProteinFeatures, self).__init__()
         self.edge_features = edge_features
@@ -934,7 +1032,7 @@ class ProteinFeatures(nn.Module):
         self.edge_embedding = nn.Linear(edge_in, edge_features, bias=False)
         self.norm_edges = nn.LayerNorm(edge_features)
 
-    def _dist(self, X, mask, eps=1E-6):
+    def _dist(self, X: torch.Tensor, mask: torch.Tensor, eps: float = 1E-6) -> Tuple[torch.Tensor, torch.Tensor]:
         mask_2D = torch.unsqueeze(mask,1) * torch.unsqueeze(mask,2)
         dX = torch.unsqueeze(X,1) - torch.unsqueeze(X,2)
         D = mask_2D * torch.sqrt(torch.sum(dX**2, 3) + eps)
@@ -944,7 +1042,7 @@ class ProteinFeatures(nn.Module):
         D_neighbors, E_idx = torch.topk(D_adjust, np.minimum(self.top_k, X.shape[1]), dim=-1, largest=False)
         return D_neighbors, E_idx
 
-    def _rbf(self, D):
+    def _rbf(self, D: torch.Tensor) -> torch.Tensor:
         device = D.device
         D_min, D_max, D_count = 2., 22., self.num_rbf
         D_mu = torch.linspace(D_min, D_max, D_count, device=device)
@@ -954,13 +1052,13 @@ class ProteinFeatures(nn.Module):
         RBF = torch.exp(-((D_expand - D_mu) / D_sigma)**2)
         return RBF
 
-    def _get_rbf(self, A, B, E_idx):
+    def _get_rbf(self, A: torch.Tensor, B: torch.Tensor, E_idx: torch.Tensor) -> torch.Tensor:
         D_A_B = torch.sqrt(torch.sum((A[:,:,None,:] - B[:,None,:,:])**2,-1) + 1e-6) #[B, L, L]
         D_A_B_neighbors = gather_edges(D_A_B[:,:,:,None], E_idx)[:,:,:,0] #[B,L,K]
         RBF_A_B = self._rbf(D_A_B_neighbors)
         return RBF_A_B
 
-    def forward(self, X, mask, residue_idx, chain_labels):
+    def forward(self, X: torch.Tensor, mask: torch.Tensor, residue_idx: torch.Tensor, chain_labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.augment_eps > 0:
             X = X + self.augment_eps * torch.randn_like(X)
         
@@ -1017,9 +1115,20 @@ class ProteinFeatures(nn.Module):
 
 
 class ProteinMPNN(nn.Module):
-    def __init__(self, num_letters, node_features, edge_features,
-        hidden_dim, num_encoder_layers=3, num_decoder_layers=3,
-        vocab=21, k_neighbors=64, augment_eps=0.05, dropout=0.1, ca_only=False):
+    def __init__(
+        self,
+        num_letters: int,
+        node_features: int,
+        edge_features: int,
+        hidden_dim: int,
+        num_encoder_layers: int = 3,
+        num_decoder_layers: int = 3,
+        vocab: int = 21,
+        k_neighbors: int = 64,
+        augment_eps: float = 0.05,
+        dropout: float = 0.1,
+        ca_only: bool = False,
+    ) -> None:
         super(ProteinMPNN, self).__init__()
 
         # Hyperparameters
@@ -1054,7 +1163,18 @@ class ProteinMPNN(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, randn, use_input_decoding_order=False, decoding_order=None):
+    def forward(
+        self,
+        X: torch.Tensor,
+        S: torch.Tensor,
+        mask: torch.Tensor,
+        chain_M: torch.Tensor,
+        residue_idx: torch.Tensor,
+        chain_encoding_all: torch.Tensor,
+        randn: torch.Tensor,
+        use_input_decoding_order: bool = False,
+        decoding_order: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """ Graph-conditioned sequence model """
         device=X.device
         # Prepare node and edge embeddings
@@ -1101,7 +1221,28 @@ class ProteinMPNN(nn.Module):
 
 
 
-    def sample(self, X, randn, S_true, chain_mask, chain_encoding_all, residue_idx, mask=None, temperature=1.0, omit_AAs_np=None, bias_AAs_np=None, chain_M_pos=None, omit_AA_mask=None, pssm_coef=None, pssm_bias=None, pssm_multi=None, pssm_log_odds_flag=None, pssm_log_odds_mask=None, pssm_bias_flag=None, bias_by_res=None):
+    def sample(
+        self,
+        X: torch.Tensor,
+        randn: torch.Tensor,
+        S_true: torch.Tensor,
+        chain_mask: torch.Tensor,
+        chain_encoding_all: torch.Tensor,
+        residue_idx: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        temperature: float = 1.0,
+        omit_AAs_np: Optional[np.ndarray] = None,
+        bias_AAs_np: Optional[np.ndarray] = None,
+        chain_M_pos: Optional[torch.Tensor] = None,
+        omit_AA_mask: Optional[torch.Tensor] = None,
+        pssm_coef: Optional[torch.Tensor] = None,
+        pssm_bias: Optional[torch.Tensor] = None,
+        pssm_multi: Optional[float] = None,
+        pssm_log_odds_flag: Optional[bool] = None,
+        pssm_log_odds_mask: Optional[torch.Tensor] = None,
+        pssm_bias_flag: Optional[bool] = None,
+        bias_by_res: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
         device = X.device
         # Prepare node and edge embeddings
         E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
@@ -1188,7 +1329,30 @@ class ProteinMPNN(nn.Module):
         return output_dict
 
 
-    def tied_sample(self, X, randn, S_true, chain_mask, chain_encoding_all, residue_idx, mask=None, temperature=1.0, omit_AAs_np=None, bias_AAs_np=None, chain_M_pos=None, omit_AA_mask=None, pssm_coef=None, pssm_bias=None, pssm_multi=None, pssm_log_odds_flag=None, pssm_log_odds_mask=None, pssm_bias_flag=None, tied_pos=None, tied_beta=None, bias_by_res=None):
+    def tied_sample(
+        self,
+        X: torch.Tensor,
+        randn: torch.Tensor,
+        S_true: torch.Tensor,
+        chain_mask: torch.Tensor,
+        chain_encoding_all: torch.Tensor,
+        residue_idx: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        temperature: float = 1.0,
+        omit_AAs_np: Optional[np.ndarray] = None,
+        bias_AAs_np: Optional[np.ndarray] = None,
+        chain_M_pos: Optional[torch.Tensor] = None,
+        omit_AA_mask: Optional[torch.Tensor] = None,
+        pssm_coef: Optional[torch.Tensor] = None,
+        pssm_bias: Optional[torch.Tensor] = None,
+        pssm_multi: Optional[float] = None,
+        pssm_log_odds_flag: Optional[bool] = None,
+        pssm_log_odds_mask: Optional[torch.Tensor] = None,
+        pssm_bias_flag: Optional[bool] = None,
+        tied_pos: Optional[Any] = None,
+        tied_beta: Optional[torch.Tensor] = None,
+        bias_by_res: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
         device = X.device
         # Prepare node and edge embeddings
         E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
@@ -1289,7 +1453,17 @@ class ProteinMPNN(nn.Module):
         return output_dict
 
 
-    def conditional_probs(self, X, S, mask, chain_M, residue_idx, chain_encoding_all, randn, backbone_only=False):
+    def conditional_probs(
+        self,
+        X: torch.Tensor,
+        S: torch.Tensor,
+        mask: torch.Tensor,
+        chain_M: torch.Tensor,
+        residue_idx: torch.Tensor,
+        chain_encoding_all: torch.Tensor,
+        randn: torch.Tensor,
+        backbone_only: bool = False,
+    ) -> torch.Tensor:
         """ Graph-conditioned sequence model """
         device=X.device
         # Prepare node and edge embeddings
@@ -1349,7 +1523,13 @@ class ProteinMPNN(nn.Module):
         return log_conditional_probs
 
 
-    def unconditional_probs(self, X, mask, residue_idx, chain_encoding_all):
+    def unconditional_probs(
+        self,
+        X: torch.Tensor,
+        mask: torch.Tensor,
+        residue_idx: torch.Tensor,
+        chain_encoding_all: torch.Tensor,
+    ) -> torch.Tensor:
         """ Graph-conditioned sequence model """
         device=X.device
         # Prepare node and edge embeddings

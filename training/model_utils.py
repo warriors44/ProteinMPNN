@@ -1,6 +1,12 @@
 from __future__ import print_function
-import json, time, os, sys, glob
+import json
+import time
+import os
+import sys
+import glob
 import shutil
+from typing import Any, Dict, Optional, Sequence, Tuple
+
 import numpy as np
 import torch
 from torch import optim
@@ -16,7 +22,19 @@ import random
 import itertools
 
 
-def featurize(batch, device):
+def featurize(
+    batch: Sequence[Dict[str, Any]],
+    device: torch.device,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    np.ndarray,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     alphabet = 'ACDEFGHIKLMNPQRSTVWYX'
     B = len(batch)
     lengths = np.array([len(b['seq']) for b in batch], dtype=np.int32) #sum of chain seq lengths
@@ -125,7 +143,7 @@ def featurize(batch, device):
     return X, S, mask, lengths, chain_M, residue_idx, mask_self, chain_encoding_all
 
 
-def loss_nll(S, log_probs, mask):
+def loss_nll(S: torch.Tensor, log_probs: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """ Negative log probabilities """
     criterion = torch.nn.NLLLoss(reduction='none')
     loss = criterion(
@@ -137,7 +155,7 @@ def loss_nll(S, log_probs, mask):
     return loss, loss_av, true_false
 
 
-def loss_smoothed(S, log_probs, mask, weight=0.1):
+def loss_smoothed(S: torch.Tensor, log_probs: torch.Tensor, mask: torch.Tensor, weight: float = 0.1) -> Tuple[torch.Tensor, torch.Tensor]:
     """ Negative log probabilities """
     S_onehot = torch.nn.functional.one_hot(S, 21).float()
 
@@ -151,13 +169,13 @@ def loss_smoothed(S, log_probs, mask, weight=0.1):
 
 
 # The following gather functions
-def gather_edges(edges, neighbor_idx):
+def gather_edges(edges: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Tensor:
     # Features [B,N,N,C] at Neighbor indices [B,N,K] => Neighbor features [B,N,K,C]
     neighbors = neighbor_idx.unsqueeze(-1).expand(-1, -1, -1, edges.size(-1))
     edge_features = torch.gather(edges, 2, neighbors)
     return edge_features
 
-def gather_nodes(nodes, neighbor_idx):
+def gather_nodes(nodes: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Tensor:
     # Features [B,N,C] at Neighbor indices [B,N,K] => [B,N,K,C]
     # Flatten and expand indices per batch [B,N,K] => [B,NK] => [B,NK,C]
     neighbors_flat = neighbor_idx.view((neighbor_idx.shape[0], -1))
@@ -167,20 +185,27 @@ def gather_nodes(nodes, neighbor_idx):
     neighbor_features = neighbor_features.view(list(neighbor_idx.shape)[:3] + [-1])
     return neighbor_features
 
-def gather_nodes_t(nodes, neighbor_idx):
+def gather_nodes_t(nodes: torch.Tensor, neighbor_idx: torch.Tensor) -> torch.Tensor:
     # Features [B,N,C] at Neighbor index [B,K] => Neighbor features[B,K,C]
     idx_flat = neighbor_idx.unsqueeze(-1).expand(-1, -1, nodes.size(2))
     neighbor_features = torch.gather(nodes, 1, idx_flat)
     return neighbor_features
 
-def cat_neighbors_nodes(h_nodes, h_neighbors, E_idx):
+def cat_neighbors_nodes(h_nodes: torch.Tensor, h_neighbors: torch.Tensor, E_idx: torch.Tensor) -> torch.Tensor:
     h_nodes = gather_nodes(h_nodes, E_idx)
     h_nn = torch.cat([h_neighbors, h_nodes], -1)
     return h_nn
 
 
 class EncLayer(nn.Module):
-    def __init__(self, num_hidden, num_in, dropout=0.1, num_heads=None, scale=30):
+    def __init__(
+        self,
+        num_hidden: int,
+        num_in: int,
+        dropout: float = 0.1,
+        num_heads: Optional[int] = None,
+        scale: float = 30,
+    ) -> None:
         super(EncLayer, self).__init__()
         self.num_hidden = num_hidden
         self.num_in = num_in
@@ -201,7 +226,14 @@ class EncLayer(nn.Module):
         self.act = torch.nn.GELU()
         self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
 
-    def forward(self, h_V, h_E, E_idx, mask_V=None, mask_attend=None):
+    def forward(
+        self,
+        h_V: torch.Tensor,
+        h_E: torch.Tensor,
+        E_idx: torch.Tensor,
+        mask_V: Optional[torch.Tensor] = None,
+        mask_attend: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """ Parallel computation of full transformer layer """
 
         h_EV = cat_neighbors_nodes(h_V, h_E, E_idx)
@@ -229,7 +261,14 @@ class EncLayer(nn.Module):
 
 
 class DecLayer(nn.Module):
-    def __init__(self, num_hidden, num_in, dropout=0.1, num_heads=None, scale=30):
+    def __init__(
+        self,
+        num_hidden: int,
+        num_in: int,
+        dropout: float = 0.1,
+        num_heads: Optional[int] = None,
+        scale: float = 30,
+    ) -> None:
         super(DecLayer, self).__init__()
         self.num_hidden = num_hidden
         self.num_in = num_in
@@ -245,7 +284,13 @@ class DecLayer(nn.Module):
         self.act = torch.nn.GELU()
         self.dense = PositionWiseFeedForward(num_hidden, num_hidden * 4)
 
-    def forward(self, h_V, h_E, mask_V=None, mask_attend=None):
+    def forward(
+        self,
+        h_V: torch.Tensor,
+        h_E: torch.Tensor,
+        mask_V: Optional[torch.Tensor] = None,
+        mask_attend: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """ Parallel computation of full transformer layer """
 
         # Concatenate h_V_i to h_E_ij
@@ -270,24 +315,24 @@ class DecLayer(nn.Module):
 
 
 class PositionWiseFeedForward(nn.Module):
-    def __init__(self, num_hidden, num_ff):
+    def __init__(self, num_hidden: int, num_ff: int) -> None:
         super(PositionWiseFeedForward, self).__init__()
         self.W_in = nn.Linear(num_hidden, num_ff, bias=True)
         self.W_out = nn.Linear(num_ff, num_hidden, bias=True)
         self.act = torch.nn.GELU()
-    def forward(self, h_V):
+    def forward(self, h_V: torch.Tensor) -> torch.Tensor:
         h = self.act(self.W_in(h_V))
         h = self.W_out(h)
         return h
 
 class PositionalEncodings(nn.Module):
-    def __init__(self, num_embeddings, max_relative_feature=32):
+    def __init__(self, num_embeddings: int, max_relative_feature: int = 32) -> None:
         super(PositionalEncodings, self).__init__()
         self.num_embeddings = num_embeddings
         self.max_relative_feature = max_relative_feature
         self.linear = nn.Linear(2*max_relative_feature+1+1, num_embeddings)
 
-    def forward(self, offset, mask):
+    def forward(self, offset: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         d = torch.clip(offset + self.max_relative_feature, 0, 2*self.max_relative_feature)*mask + (1-mask)*(2*self.max_relative_feature+1)
         d_onehot = torch.nn.functional.one_hot(d, 2*self.max_relative_feature+1+1)
         E = self.linear(d_onehot.float())
@@ -295,8 +340,16 @@ class PositionalEncodings(nn.Module):
 
 
 class ProteinFeatures(nn.Module):
-    def __init__(self, edge_features, node_features, num_positional_embeddings=16,
-        num_rbf=16, top_k=30, augment_eps=0., num_chain_embeddings=16):
+    def __init__(
+        self,
+        edge_features: int,
+        node_features: int,
+        num_positional_embeddings: int = 16,
+        num_rbf: int = 16,
+        top_k: int = 30,
+        augment_eps: float = 0.,
+        num_chain_embeddings: int = 16,
+    ) -> None:
         """ Extract protein features """
         super(ProteinFeatures, self).__init__()
         self.edge_features = edge_features
@@ -311,7 +364,7 @@ class ProteinFeatures(nn.Module):
         self.edge_embedding = nn.Linear(edge_in, edge_features, bias=False)
         self.norm_edges = nn.LayerNorm(edge_features)
 
-    def _dist(self, X, mask, eps=1E-6):
+    def _dist(self, X: torch.Tensor, mask: torch.Tensor, eps: float = 1E-6) -> Tuple[torch.Tensor, torch.Tensor]:
         mask_2D = torch.unsqueeze(mask,1) * torch.unsqueeze(mask,2)
         dX = torch.unsqueeze(X,1) - torch.unsqueeze(X,2)
         D = mask_2D * torch.sqrt(torch.sum(dX**2, 3) + eps)
@@ -321,7 +374,7 @@ class ProteinFeatures(nn.Module):
         D_neighbors, E_idx = torch.topk(D_adjust, np.minimum(self.top_k, X.shape[1]), dim=-1, largest=False)
         return D_neighbors, E_idx
 
-    def _rbf(self, D):
+    def _rbf(self, D: torch.Tensor) -> torch.Tensor:
         device = D.device
         D_min, D_max, D_count = 2., 22., self.num_rbf
         D_mu = torch.linspace(D_min, D_max, D_count, device=device)
@@ -331,13 +384,13 @@ class ProteinFeatures(nn.Module):
         RBF = torch.exp(-((D_expand - D_mu) / D_sigma)**2)
         return RBF
 
-    def _get_rbf(self, A, B, E_idx):
+    def _get_rbf(self, A: torch.Tensor, B: torch.Tensor, E_idx: torch.Tensor) -> torch.Tensor:
         D_A_B = torch.sqrt(torch.sum((A[:,:,None,:] - B[:,None,:,:])**2,-1) + 1e-6) #[B, L, L]
         D_A_B_neighbors = gather_edges(D_A_B[:,:,:,None], E_idx)[:,:,:,0] #[B,L,K]
         RBF_A_B = self._rbf(D_A_B_neighbors)
         return RBF_A_B
 
-    def forward(self, X, mask, residue_idx, chain_labels):
+    def forward(self, X: torch.Tensor, mask: torch.Tensor, residue_idx: torch.Tensor, chain_labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.training and self.augment_eps > 0:
             X = X + self.augment_eps * torch.randn_like(X)
         
@@ -394,9 +447,19 @@ class ProteinFeatures(nn.Module):
 
 
 class ProteinMPNN(nn.Module):
-    def __init__(self, num_letters=21, node_features=128, edge_features=128,
-        hidden_dim=128, num_encoder_layers=3, num_decoder_layers=3,
-        vocab=21, k_neighbors=32, augment_eps=0.1, dropout=0.1):
+    def __init__(
+        self,
+        num_letters: int = 21,
+        node_features: int = 128,
+        edge_features: int = 128,
+        hidden_dim: int = 128,
+        num_encoder_layers: int = 3,
+        num_decoder_layers: int = 3,
+        vocab: int = 21,
+        k_neighbors: int = 32,
+        augment_eps: float = 0.1,
+        dropout: float = 0.1,
+    ) -> None:
         super(ProteinMPNN, self).__init__()
 
         # Hyperparameters
@@ -426,7 +489,15 @@ class ProteinMPNN(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, X, S, mask, chain_M, residue_idx, chain_encoding_all):
+    def forward(
+        self,
+        X: torch.Tensor,
+        S: torch.Tensor,
+        mask: torch.Tensor,
+        chain_M: torch.Tensor,
+        residue_idx: torch.Tensor,
+        chain_encoding_all: torch.Tensor,
+    ) -> torch.Tensor:
         """ Graph-conditioned sequence model """
         device=X.device
         # Prepare node and edge embeddings
@@ -473,7 +544,7 @@ class ProteinMPNN(nn.Module):
 
 class NoamOpt:
     "Optim wrapper that implements rate."
-    def __init__(self, model_size, factor, warmup, optimizer, step):
+    def __init__(self, model_size: int, factor: float, warmup: int, optimizer: optim.Optimizer, step: int) -> None:
         self.optimizer = optimizer
         self._step = step
         self.warmup = warmup
@@ -482,11 +553,11 @@ class NoamOpt:
         self._rate = 0
 
     @property
-    def param_groups(self):
+    def param_groups(self) -> Any:
         """Return param_groups."""
         return self.optimizer.param_groups
 
-    def step(self):
+    def step(self) -> None:
         "Update parameters and rate"
         self._step += 1
         rate = self.rate()
@@ -495,7 +566,7 @@ class NoamOpt:
         self._rate = rate
         self.optimizer.step()
 
-    def rate(self, step = None):
+    def rate(self, step: Optional[int] = None) -> float:
         "Implement `lrate` above"
         if step is None:
             step = self._step
@@ -503,10 +574,10 @@ class NoamOpt:
             (self.model_size ** (-0.5) *
             min(step ** (-0.5), step * self.warmup ** (-1.5)))
 
-    def zero_grad(self):
+    def zero_grad(self) -> None:
         self.optimizer.zero_grad()
 
-def get_std_opt(parameters, d_model, step):
+def get_std_opt(parameters: Any, d_model: int, step: int) -> NoamOpt:
     return NoamOpt(
         d_model, 2, 4000, torch.optim.Adam(parameters, lr=0, betas=(0.9, 0.98), eps=1e-9), step
     )

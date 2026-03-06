@@ -6,10 +6,17 @@ import numpy as np
 import time
 import random
 import os
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 class StructureDataset():
-    def __init__(self, pdb_dict_list, verbose=True, truncate=None, max_length=100,
-        alphabet='ACDEFGHIKLMNPQRSTVWYX'):
+    def __init__(
+        self,
+        pdb_dict_list: Sequence[Dict[str, Any]],
+        verbose: bool = True,
+        truncate: Optional[int] = None,
+        max_length: int = 100,
+        alphabet: str = 'ACDEFGHIKLMNPQRSTVWYX',
+    ) -> None:
         alphabet_set = set([a for a in alphabet])
         discard_count = {
             'bad_chars': 0,
@@ -43,16 +50,22 @@ class StructureDataset():
                 #print('{} entries ({} loaded) in {:.1f} s'.format(len(self.data), i+1, elapsed))
 
             #print('Discarded', discard_count)
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.data[idx]
 
 
 class StructureLoader():
-    def __init__(self, dataset, batch_size=100, shuffle=True,
-        collate_fn=lambda x:x, drop_last=False):
+    def __init__(
+        self,
+        dataset: Any,
+        batch_size: int = 100,
+        shuffle: bool = True,
+        collate_fn: Any = lambda x:x,
+        drop_last: bool = False,
+    ) -> None:
         self.dataset = dataset
         self.size = len(dataset)
         self.lengths = [len(dataset[i]['seq']) for i in range(self.size)]
@@ -74,22 +87,22 @@ class StructureLoader():
             clusters.append(batch)
         self.clusters = clusters
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.clusters)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[List[Dict[str, Any]]]:
         np.random.shuffle(self.clusters)
         for b_idx in self.clusters:
             batch = [self.dataset[i] for i in b_idx]
             yield batch
 
 
-def worker_init_fn(worker_id):
+def worker_init_fn(worker_id: int) -> None:
     np.random.seed()
 
 class NoamOpt:
     "Optim wrapper that implements rate."
-    def __init__(self, model_size, factor, warmup, optimizer, step):
+    def __init__(self, model_size: int, factor: float, warmup: int, optimizer: torch.optim.Optimizer, step: int) -> None:
         self.optimizer = optimizer
         self._step = step
         self.warmup = warmup
@@ -98,11 +111,11 @@ class NoamOpt:
         self._rate = 0
 
     @property
-    def param_groups(self):
+    def param_groups(self) -> Any:
         """Return param_groups."""
         return self.optimizer.param_groups
 
-    def step(self):
+    def step(self) -> None:
         "Update parameters and rate"
         self._step += 1
         rate = self.rate()
@@ -111,7 +124,7 @@ class NoamOpt:
         self._rate = rate
         self.optimizer.step()
 
-    def rate(self, step = None):
+    def rate(self, step: Optional[int] = None) -> float:
         "Implement `lrate` above"
         if step is None:
             step = self._step
@@ -119,10 +132,10 @@ class NoamOpt:
             (self.model_size ** (-0.5) *
             min(step ** (-0.5), step * self.warmup ** (-1.5)))
 
-    def zero_grad(self):
+    def zero_grad(self) -> None:
         self.optimizer.zero_grad()
 
-def get_std_opt(parameters, d_model, step):
+def get_std_opt(parameters: Any, d_model: int, step: int) -> NoamOpt:
     return NoamOpt(
         d_model, 2, 4000, torch.optim.Adam(parameters, lr=0, betas=(0.9, 0.98), eps=1e-9), step
     )
@@ -130,7 +143,12 @@ def get_std_opt(parameters, d_model, step):
 
 
 
-def get_pdbs(data_loader, repeat=1, max_length=10000, num_units=1000000):
+def get_pdbs(
+    data_loader: Any,
+    repeat: int = 1,
+    max_length: int = 10000,
+    num_units: int = 1000000,
+) -> List[Dict[str, Any]]:
     init_alphabet = ['A', 'B', 'C', 'D', 'E', 'F', 'G','H', 'I', 'J','K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T','U', 'V','W','X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g','h', 'i', 'j','k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't','u', 'v','w','x', 'y', 'z']
     extra_alphabet = [str(item) for item in list(np.arange(300))]
     chain_alphabet = init_alphabet + extra_alphabet
@@ -209,16 +227,16 @@ def get_pdbs(data_loader, repeat=1, max_length=10000, num_units=1000000):
 
 
 class PDB_dataset(torch.utils.data.Dataset):
-    def __init__(self, IDs, loader, train_dict, params):
+    def __init__(self, IDs: Sequence[Any], loader: Any, train_dict: Dict[Any, Any], params: Dict[str, Any]) -> None:
         self.IDs = IDs
         self.train_dict = train_dict
         self.loader = loader
         self.params = params
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.IDs)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> Dict[str, Any]:
         ID = self.IDs[index]
         sel_idx = np.random.randint(0, len(self.train_dict[ID]))
         out = self.loader(self.train_dict[ID][sel_idx], self.params)
@@ -226,7 +244,7 @@ class PDB_dataset(torch.utils.data.Dataset):
 
 
 
-def loader_pdb(item,params):
+def loader_pdb(item: Sequence[Any], params: Dict[str, Any]) -> Dict[str, Any]:
 
     pdbid,chid = item[0].split('_')
     PREFIX = "%s/pdb/%s/%s"%(params['DIR'],pdbid[1:3],pdbid)
@@ -312,7 +330,7 @@ def loader_pdb(item,params):
 
 
 
-def build_training_clusters(params, debug):
+def build_training_clusters(params: Dict[str, Any], debug: bool) -> Tuple[Dict[int, List[List[Any]]], Dict[int, List[List[Any]]], Dict[int, List[List[Any]]]]:
     val_ids = set([int(l) for l in open(params['VAL']).readlines()])
     test_ids = set([int(l) for l in open(params['TEST']).readlines()])
    

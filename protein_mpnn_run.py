@@ -1,9 +1,13 @@
 import argparse
 import os.path
 
-def main(args):
+def main(args: argparse.Namespace) -> None:
 
-    import json, time, os, sys, glob
+    import glob
+    import json
+    import os
+    import sys
+    import time
     import shutil
     import warnings
     import numpy as np
@@ -15,10 +19,21 @@ def main(args):
     import torch.nn as nn
     import torch.nn.functional as F
     import random
-    import os.path
     import subprocess
     
-    from protein_mpnn_utils import loss_nll, loss_smoothed, gather_edges, gather_nodes, gather_nodes_t, cat_neighbors_nodes, _scores, _S_to_seq, tied_featurize, parse_PDB, parse_fasta
+    from protein_mpnn_utils import (
+        loss_nll,
+        loss_smoothed,
+        gather_edges,
+        gather_nodes,
+        gather_nodes_t,
+        cat_neighbors_nodes,
+        _scores,
+        _S_to_seq,
+        tied_featurize,
+        parse_PDB,
+        parse_fasta,
+    )
     from protein_mpnn_utils import StructureDataset, StructureDatasetPDB, ProteinMPNN
 
     if args.seed:
