@@ -134,4 +134,12 @@ dmypy.json
 # Pytest
 pytest.ini
 
+# experiment
 data
+
+# output
+training_lo/exp*
+
+# log
+*.e*
+*.o*
