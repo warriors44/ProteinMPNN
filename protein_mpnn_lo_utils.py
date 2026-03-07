@@ -30,8 +30,11 @@ def _sample_gumbel(
     device: torch.device,
     eps: float = 1e-20,
 ) -> torch.Tensor:
-    """Sample from Gumbel(0, 1) distribution."""
-    U = torch.rand(shape, device=device)
+    """Sample from Gumbel(0, 1) distribution.
+
+    Always computed in float32 to avoid overflow under mixed precision (FP16).
+    """
+    U = torch.rand(shape, device=device, dtype=torch.float32)
     return -torch.log(-torch.log(U + eps) + eps)
 
 
@@ -52,8 +55,9 @@ def gumbel_top_k(
     """
     if k is None:
         k = logits.size(-1)
+    logits_f32 = logits.float()
     gumbel_noise = _sample_gumbel(logits.shape, device=logits.device)
-    perturbed = logits + gumbel_noise
+    perturbed = logits_f32 + gumbel_noise
     _, permutation = perturbed.topk(k, dim=-1)
     return permutation
 
@@ -74,6 +78,8 @@ def plackett_luce_log_prob(
     Returns:
         log_probs: [B, N] where log_probs[b, i] = log q(z_i | z_{<i}).
     """
+    orig_dtype = logits.dtype
+    logits = logits.float()
     B, N = logits.shape
     K = permutation.size(1)
 
@@ -97,7 +103,7 @@ def plackett_luce_log_prob(
         log_numerator - log_cumsum,
         torch.zeros_like(log_numerator),
     )
-    return log_probs
+    return log_probs.to(orig_dtype)
 
 
 # ======================================================================
@@ -632,18 +638,17 @@ class ProteinMPNN_LO(nn.Module):
         B, N = design_mask.shape
         device = design_mask.device
 
+        # Compute in float32 to avoid overflow under mixed precision (FP16).
+        q_logits_f32 = q_logits.float()
         gumbel_noise = _sample_gumbel(q_logits.shape, device=device)
         # Fixed/padded positions get very HIGH scores so topk selects them
         # first (= earliest ranks = "already decoded").
         # Designable positions get Gumbel-perturbed q_logits (finite).
-        # NOTE: The "high" constant must be representable in the current dtype
-        # (e.g. float16 under mixed precision), so we derive it from finfo
-        # instead of hard-coding something like 1e9 which would overflow.
-        high_val = torch.finfo(q_logits.dtype).max / 10.0
+        high_val = torch.finfo(torch.float32).max / 10.0
         scores = torch.where(
             design_mask.bool(),
-            q_logits + gumbel_noise,
-            torch.full_like(q_logits, high_val) + torch.rand_like(q_logits),
+            q_logits_f32 + gumbel_noise,
+            torch.full_like(q_logits_f32, high_val) + torch.rand_like(q_logits_f32),
         )
         _, full_perm = scores.topk(N, dim=-1)
         return full_perm
