@@ -1132,6 +1132,86 @@ class ProteinMPNN_LO(nn.Module):
         return output_dict
 
     # ==================================================================
+    # Helper: sequential log p_theta(z, x | s) computation
+    # ==================================================================
+
+    def _compute_log_p_z_and_x_sequential(
+        self,
+        h_V_enc: torch.Tensor,
+        h_E: torch.Tensor,
+        E_idx: torch.Tensor,
+        S: torch.Tensor,
+        mask: torch.Tensor,
+        design_mask: torch.Tensor,
+        full_perm: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute log p_theta(z|s) and log p_theta(x|z,s) via L sequential forward_p calls.
+
+        p_theta's order head is an autoregressive categorical model (NOT
+        Plackett-Luce), so each step's logit must be computed under the correct
+        partial context z_{<i} via _build_partial_ar_mask.
+
+        Args:
+            h_V_enc: encoder output [B, L, H].
+            h_E: edge embeddings [B, L, K, H].
+            E_idx: neighbor indices [B, L, K].
+            S: ground-truth sequence [B, L].
+            mask: padding mask [B, L].
+            design_mask: [B, L] (1 = designable).
+            full_perm: [B, L] permutation (fixed positions first).
+
+        Returns:
+            log_p_z: [B] sum of log p_theta(z_i | z_{<i}, s) over designable steps.
+            log_p_x_given_z: [B] sum of log p_theta(x_{z_i} | x_{z_{<i}}, s)
+                over designable steps.
+        """
+        B, N = S.shape
+        device = S.device
+
+        num_fixed = ((1.0 - design_mask) * mask).sum(dim=-1).long()
+        L_design_int = design_mask.sum(dim=-1).long()
+        max_design = int(L_design_int.max().item())
+
+        rank = torch.zeros(B, N, dtype=torch.long, device=device)
+        rank.scatter_(
+            1, full_perm,
+            torch.arange(N, device=device).unsqueeze(0).expand(B, -1),
+        )
+
+        log_p_z = torch.zeros(B, device=device)
+        log_p_x_given_z = torch.zeros(B, device=device)
+
+        for d in range(max_design):
+            step = num_fixed + d
+            i_samples = step + 1
+
+            active = (d < L_design_int).float()
+
+            ar_mask = self._build_partial_ar_mask(E_idx, full_perm, i_samples)
+            log_probs_step, p_order_logits_step = self.forward_p(
+                h_V_enc, h_E, E_idx, S, mask, design_mask, ar_mask=ar_mask,
+            )
+
+            remaining = (rank >= step.unsqueeze(1)).float() * design_mask
+
+            log_p_order = F.log_softmax(
+                p_order_logits_step.masked_fill(remaining == 0, float('-inf')),
+                dim=-1,
+            )
+
+            z_i = torch.gather(full_perm, 1, step.unsqueeze(1))
+            log_p_zi = torch.gather(log_p_order, 1, z_i).squeeze(1)
+            log_p_z = log_p_z + log_p_zi * active
+
+            log_p_token_all = torch.gather(
+                log_probs_step, 2, S.unsqueeze(-1),
+            ).squeeze(-1)
+            log_p_xi = torch.gather(log_p_token_all, 1, z_i).squeeze(1)
+            log_p_x_given_z = log_p_x_given_z + log_p_xi * active
+
+        return log_p_z, log_p_x_given_z
+
+    # ==================================================================
     # Importance-sampling log-likelihood estimate
     # ==================================================================
 
@@ -1146,6 +1226,16 @@ class ProteinMPNN_LO(nn.Module):
         num_samples_eval: int = 8,
     ) -> torch.Tensor:
         """Estimate log p_theta(x | structure) via importance sampling with q_theta.
+
+        For each batch element b:
+          1. Sample K permutations z^(k) ~ q_theta(z | x, s) via Plackett-Luce.
+          2. For each z^(k), compute log p_theta(x | z^(k), s) and
+             log p_theta(z^(k) | s) by running L sequential forward_p calls
+             with partial autoregressive masks (one per decoding step).
+          3. Compute log q_theta(z^(k) | x, s) via the Plackett-Luce formula
+             (valid because q's logits are step-independent).
+          4. Form importance weights and use log-sum-exp to approximate
+             log p_theta(x | s).
 
         Args:
             X: coordinates [B, L, 4, 3].
@@ -1175,28 +1265,15 @@ class ProteinMPNN_LO(nn.Module):
                 design_mask, mask, q_logits.detach(),
             )
 
-            log_probs_k, p_order_logits_k = self.forward_p(
-                h_V_enc, h_E, E_idx, S, mask, design_mask,
-                permutation=full_perm,
+            log_p_z, log_p_x_given_z = self._compute_log_p_z_and_x_sequential(
+                h_V_enc, h_E, E_idx, S, mask, design_mask, full_perm,
             )
 
-            log_p_token = torch.gather(
-                log_probs_k, 2, S.unsqueeze(-1),
-            ).squeeze(-1)
-            log_p_x_given_z = (log_p_token * design_mask).sum(-1)
-
-            # Step-level mask: which steps correspond to designable positions
             step_design = torch.gather(design_mask, 1, full_perm)
 
             log_q_all = plackett_luce_log_prob(q_logits, full_perm, mask)
             log_q_safe = log_q_all.masked_fill(~torch.isfinite(log_q_all), 0.0)
             log_q_z = (log_q_safe * step_design).sum(-1)
-
-            log_p_all = plackett_luce_log_prob(
-                p_order_logits_k, full_perm, mask,
-            )
-            log_p_safe = log_p_all.masked_fill(~torch.isfinite(log_p_all), 0.0)
-            log_p_z = (log_p_safe * step_design).sum(-1)
 
             log_weight = log_p_z - log_q_z
             log_terms.append(log_weight + log_p_x_given_z)
