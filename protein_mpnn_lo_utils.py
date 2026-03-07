@@ -362,7 +362,7 @@ class ProteinMPNN_LO(nn.Module):
 
         for dec_layer in decoder_layers:
             h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
-            h_V = dec_layer(h_V, h_ESV, mask)
+            h_V = dec_layer(h_V, h_ESV, mask_V=mask, mask_attend=mask_attend)
 
         q_logits = order_head(h_V).squeeze(-1)
         q_logits = q_logits.masked_fill(design_mask == 0, float('-inf'))
