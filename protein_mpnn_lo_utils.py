@@ -451,6 +451,9 @@ class ProteinMPNN_LO(nn.Module):
                 + log p(z_i=j | z_{<i}, x_{z_{<i}}, s)
                 - log q(z_i=j | z_{<i}, x, s) ]
 
+        Always computed in float32 to avoid numerical instability under
+        mixed precision (FP16).
+
         Args:
             log_probs: [B, L, vocab] from forward_p (with partial ar_mask).
             p_order_logits: [B, L] from forward_p.
@@ -461,6 +464,12 @@ class ProteinMPNN_LO(nn.Module):
         Returns:
             F: [B] scalar F_theta per batch element.
         """
+        orig_dtype = log_probs.dtype
+        log_probs = log_probs.float()
+        p_order_logits = p_order_logits.float()
+        q_logits = q_logits.float()
+        remaining_mask = remaining_mask.float()
+
         log_p_token = torch.gather(
             log_probs, 2, S.unsqueeze(-1),
         ).squeeze(-1)
@@ -485,7 +494,7 @@ class ProteinMPNN_LO(nn.Module):
             torch.zeros_like(log_p_token),
         )
         F_val = (q_weights * inner).sum(-1)
-        return F_val
+        return F_val.to(orig_dtype)
 
     # ==================================================================
     # ELBO training  (Algorithm 1, Eqs. 8/9/11)

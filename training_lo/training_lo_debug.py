@@ -5,14 +5,12 @@ import os.path
 
 
 def main(args: argparse.Namespace) -> None:
-    """Train ProteinMPNN_LO with the LO-ARM ELBO (RLOO) objective.
+    """Debug variant of LO training with extra logging.
 
-    This script intentionally mirrors the data pipeline, logging, and checkpoint
-    conventions in `training/training.py`, but swaps the model and loss:
-    - model: `ProteinMPNN_LO` from `protein_mpnn_lo_utils.py`
-    - objective: `model.compute_elbo(...)` (Algorithm 1 + RLOO)
-    - metrics: NLL/perplexity/accuracy computed via `model.forward(...)` as a
-      diagnostic (not optimized directly).
+    This script is a near-copy of `training_lo.py`, but additionally writes:
+    - step-level grad norms to the main epoch log (same columns)
+    - an optional debug log file that records the same columns as `log.txt`
+      every N steps (controlled by --debug_log_interval).
     """
 
     import copy
@@ -80,12 +78,7 @@ def main(args: argparse.Namespace) -> None:
             "W_order_q_sep",
         ),
     ) -> PartialLoadReport:
-        """Load parameters by key+shape match, skipping excluded prefixes.
-
-        This is designed for initializing a LO model from a non-LO ProteinMPNN
-        checkpoint: common weights are loaded; order/q-specific weights are
-        skipped.
-        """
+        """Load parameters by key+shape match, skipping excluded prefixes."""
         model_state = model.state_dict()
         loaded: List[str] = []
         skipped_shape_mismatch: List[str] = []
@@ -134,9 +127,15 @@ def main(args: argparse.Namespace) -> None:
         )
         mask_for_loss = mask * chain_M
         loss, loss_av, true_false = loss_nll(S, log_probs, mask_for_loss)
-        nll = float((loss * mask_for_loss).sum().detach().cpu().item() / (mask_for_loss.sum().detach().cpu().item() + 1e-8))
+        nll = float(
+            (loss * mask_for_loss).sum().detach().cpu().item()
+            / (mask_for_loss.sum().detach().cpu().item() + 1e-8)
+        )
         perplexity = float(np.exp(nll))
-        acc = float((true_false * mask_for_loss).sum().detach().cpu().item() / (mask_for_loss.sum().detach().cpu().item() + 1e-8))
+        acc = float(
+            (true_false * mask_for_loss).sum().detach().cpu().item()
+            / (mask_for_loss.sum().detach().cpu().item() + 1e-8)
+        )
         return nll, perplexity, acc
 
     def _compute_isq_nll(
@@ -161,7 +160,12 @@ def main(args: argparse.Namespace) -> None:
             num_samples_eval=num_samples_eval,
         )  # [B]
         L_design = (mask * chain_M).sum(dim=-1).clamp(min=1.0)  # [B]
-        nll = float((-(loglik_per_res * L_design).sum() / (L_design.sum() + 1e-8)).detach().cpu().item())
+        nll = float(
+            (
+                -(loglik_per_res * L_design).sum()
+                / (L_design.sum() + 1e-8)
+            ).detach().cpu().item()
+        )
         ppl = float(np.exp(nll))
         return nll, ppl
 
@@ -192,6 +196,18 @@ def main(args: argparse.Namespace) -> None:
     logfile = base_folder + "log.txt"
     if not args.previous_checkpoint:
         with open(logfile, "w") as f:
+            f.write(
+                "epoch\tstep\ttime_s\t"
+                "train_elbo_loss\ttrain_nll\ttrain_ppl\ttrain_acc\t"
+                "valid_elbo_loss\tvalid_nll_proxy\tvalid_ppl_proxy\tvalid_acc\t"
+                "valid_nll_isq\tvalid_ppl_isq\t"
+                "i_mean\tdelta_F_abs\tgrad_norm\n"
+            )
+
+    # Debug log: same columns as logfile, but written every debug_log_interval steps.
+    debug_logfile = base_folder + "log_debug.txt"
+    if args.debug_log_interval > 0 and (not args.previous_checkpoint):
+        with open(debug_logfile, "w") as f:
             f.write(
                 "epoch\tstep\ttime_s\t"
                 "train_elbo_loss\ttrain_nll\ttrain_ppl\ttrain_acc\t"
@@ -309,8 +325,12 @@ def main(args: argparse.Namespace) -> None:
         pdb_dict_train = q_train.get().result()
         pdb_dict_valid = q_valid.get().result()
 
-        dataset_train = StructureDataset(pdb_dict_train, truncate=None, max_length=args.max_protein_length)
-        dataset_valid = StructureDataset(pdb_dict_valid, truncate=None, max_length=args.max_protein_length)
+        dataset_train = StructureDataset(
+            pdb_dict_train, truncate=None, max_length=args.max_protein_length,
+        )
+        dataset_valid = StructureDataset(
+            pdb_dict_valid, truncate=None, max_length=args.max_protein_length,
+        )
 
         loader_train = StructureLoader(dataset_train, batch_size=args.batch_size)
         loader_valid = StructureLoader(dataset_valid, batch_size=args.batch_size)
@@ -337,15 +357,23 @@ def main(args: argparse.Namespace) -> None:
                 if reload_c != 0:
                     pdb_dict_train = q_train.get().result()
                     dataset_train = StructureDataset(
-                        pdb_dict_train, truncate=None, max_length=args.max_protein_length,
+                        pdb_dict_train,
+                        truncate=None,
+                        max_length=args.max_protein_length,
                     )
-                    loader_train = StructureLoader(dataset_train, batch_size=args.batch_size)
+                    loader_train = StructureLoader(
+                        dataset_train, batch_size=args.batch_size,
+                    )
 
                     pdb_dict_valid = q_valid.get().result()
                     dataset_valid = StructureDataset(
-                        pdb_dict_valid, truncate=None, max_length=args.max_protein_length,
+                        pdb_dict_valid,
+                        truncate=None,
+                        max_length=args.max_protein_length,
                     )
-                    loader_valid = StructureLoader(dataset_valid, batch_size=args.batch_size)
+                    loader_valid = StructureLoader(
+                        dataset_valid, batch_size=args.batch_size,
+                    )
 
                     q_train.put_nowait(
                         executor.submit(
@@ -378,11 +406,12 @@ def main(args: argparse.Namespace) -> None:
                         )
                     scaler.scale(loss_elbo).backward()
                     if args.gradient_norm > 0.0:
-                        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_norm)
-                        grad_norm_sum += float(total_norm.detach().cpu().item())
+                        total_norm = torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), args.gradient_norm,
+                        )
+                        grad_norm_value = float(total_norm.detach().cpu().item())
+                        grad_norm_sum += grad_norm_value
                         grad_norm_w += 1.0
-                    # Use NoamOpt wrapper here so its step() (with learning rate
-                    # schedule) is invoked, matching training/training.py.
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -391,8 +420,11 @@ def main(args: argparse.Namespace) -> None:
                     )
                     loss_elbo.backward()
                     if args.gradient_norm > 0.0:
-                        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_norm)
-                        grad_norm_sum += float(total_norm.detach().cpu().item())
+                        total_norm = torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), args.gradient_norm,
+                        )
+                        grad_norm_value = float(total_norm.detach().cpu().item())
+                        grad_norm_sum += grad_norm_value
                         grad_norm_w += 1.0
                     optimizer.step()
 
@@ -401,7 +433,9 @@ def main(args: argparse.Namespace) -> None:
                     nll, ppl, acc = _compute_nll_metrics(
                         model, X, S, mask, chain_M, residue_idx, chain_encoding_all,
                     )
-                    weight = float((mask * chain_M).sum().detach().cpu().item())
+                    weight = float(
+                        (mask * chain_M).sum().detach().cpu().item(),
+                    )
                     train_elbo_sum += float(loss_elbo.detach().cpu().item()) * weight
                     train_elbo_w += weight
                     train_nll_sum += nll * weight
@@ -409,16 +443,39 @@ def main(args: argparse.Namespace) -> None:
                     train_w += weight
 
                     if "i_mean" in info:
-                        i_mean_sum += float(info["i_mean"].detach().cpu().item())
+                        i_mean_sum += float(
+                            info["i_mean"].detach().cpu().item(),
+                        )
                         info_w += 1.0
                     if "delta_F_abs" in info:
-                        delta_f_sum += float(info["delta_F_abs"].detach().cpu().item())
+                        delta_f_sum += float(
+                            info["delta_F_abs"].detach().cpu().item(),
+                        )
 
                 total_step += 1
 
+                # Optional step-level debug log (training side only; val fields set to nan).
+                if args.debug_log_interval > 0 and (total_step % args.debug_log_interval == 0):
+                    train_elbo_cur = train_elbo_sum / max(train_elbo_w, 1e-8)
+                    train_nll_cur = train_nll_sum / max(train_w, 1e-8)
+                    train_ppl_cur = float(np.exp(train_nll_cur))
+                    train_acc_cur = train_acc_sum / max(train_w, 1e-8)
+                    i_mean_cur = i_mean_sum / max(info_w, 1e-8)
+                    delta_f_cur = delta_f_sum / max(info_w, 1e-8)
+                    grad_norm_avg_cur = grad_norm_sum / max(grad_norm_w, 1.0)
+                    dt_cur = float(time.time() - t0)
+
+                    with open(debug_logfile, "a") as df:
+                        df.write(
+                            f"{epoch_idx + 1}\t{total_step}\t{dt_cur:.1f}\t"
+                            f"{train_elbo_cur:.6f}\t{train_nll_cur:.6f}\t{train_ppl_cur:.3f}\t{train_acc_cur:.4f}\t"
+                            f"nan\tnan\tnan\tnan\tnan\tnan\t"
+                            f"{i_mean_cur:.3f}\t{delta_f_cur:.6f}\t{grad_norm_avg_cur:.6f}\n"
+                        )
+
             # Validation: always proxy; full IS-q every interval (and epoch 1)
             epoch_num = epoch_idx + 1
-            run_full_isq = (epoch_num % int(args.eval_full_interval) == 0) #or (epoch_num == 1)
+            run_full_isq = (epoch_num % int(args.eval_full_interval) == 0)
             model.eval()
             valid_elbo_sum = 0.0
             valid_elbo_w = 0.0
@@ -449,7 +506,10 @@ def main(args: argparse.Namespace) -> None:
                     )  # [B]
                     L_design = (mask * chain_M).sum(dim=-1).clamp(min=1.0)  # [B]
                     proxy_nll = float(
-                        (-(proxy_loglik_per_res * L_design).sum() / (L_design.sum() + 1e-8)).detach().cpu().item()
+                        (
+                            -(proxy_loglik_per_res * L_design).sum()
+                            / (L_design.sum() + 1e-8)
+                        ).detach().cpu().item()
                     )
                     if run_full_isq:
                         nll_isq, _ppl_isq = _compute_isq_nll(
@@ -462,7 +522,9 @@ def main(args: argparse.Namespace) -> None:
                             chain_encoding_all,
                             num_samples_eval=int(args.eval_num_samples),
                         )
-                    weight = float((mask * chain_M).sum().detach().cpu().item())
+                    weight = float(
+                        (mask * chain_M).sum().detach().cpu().item(),
+                    )
                     valid_elbo_sum += float(loss_elbo.detach().cpu().item()) * weight
                     valid_elbo_w += weight
                     valid_nll_proxy_sum += proxy_nll * weight
@@ -640,10 +702,15 @@ if __name__ == "__main__":
         default=100,
         help="Run full IS-q evaluation every N epochs (epoch 1 is always run).",
     )
+    argparser.add_argument(
+        "--debug_log_interval",
+        type=int,
+        default=0,
+        help="If >0, write step-level debug log every N steps to log_debug.txt.",
+    )
 
     parsed = argparser.parse_args()
 
-    # Normalize int flags to bool-like values where required
     parsed.separate_q_decoder = int(parsed.separate_q_decoder)
     parsed.ca_only = int(parsed.ca_only)
     if parsed.init_from_checkpoint == "":
