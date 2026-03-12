@@ -1288,6 +1288,68 @@ class ProteinMPNN_LO(nn.Module):
         loglik_per_res = log_p_x / L_design
         return loglik_per_res
 
+    def compute_loglik_proxy_q_px(
+        self,
+        X: torch.Tensor,
+        S: torch.Tensor,
+        mask: torch.Tensor,
+        chain_M: torch.Tensor,
+        residue_idx: torch.Tensor,
+        chain_encoding_all: torch.Tensor,
+        num_samples_eval: int = 8,
+    ) -> torch.Tensor:
+        """Estimate per-residue log-likelihood via a fast proxy using q(z).
+
+        This method approximates:
+            log p_theta(x | s) ~= log E_{z ~ q_theta(z | x, s)}[ p_theta(x | z, s) ].
+
+        Unlike `compute_loglik_is_q`, it does NOT compute importance weights and
+        avoids the expensive sequential evaluation of p_theta(z | s). For each
+        sampled permutation z, it runs exactly one `forward_p` call with the
+        full decoding context (i_samples = N), and aggregates teacher-forced
+        token log-probabilities over designable positions.
+
+        Args:
+            X: coordinates [B, L, 4, 3].
+            S: ground-truth sequence [B, L].
+            mask: padding mask [B, L].
+            chain_M: chain design mask [B, L].
+            residue_idx: residue indices [B, L].
+            chain_encoding_all: chain encoding [B, L].
+            num_samples_eval: number of q(z) samples K.
+
+        Returns:
+            loglik_per_res: [B] per-residue proxy log-likelihood estimates.
+        """
+        B, N = S.shape
+        device = S.device
+        design_mask = chain_M * mask
+
+        h_V_enc, h_E, E_idx = self._encode(X, mask, residue_idx, chain_encoding_all)
+        q_logits = self.forward_q(h_V_enc, h_E, E_idx, S, mask, design_mask)
+
+        L_design = design_mask.sum(dim=-1).clamp(min=1.0)  # [B]
+        i_samples = torch.full((B,), N, dtype=torch.long, device=device)
+
+        log_p_x_given_z_terms: List[torch.Tensor] = []
+        for _ in range(num_samples_eval):
+            full_perm = self._build_fixed_first_perm(
+                design_mask, mask, q_logits.detach(),
+            )
+            ar_mask = self._build_partial_ar_mask(E_idx, full_perm, i_samples)
+            log_probs_k, _p_order_logits_k = self.forward_p(
+                h_V_enc, h_E, E_idx, S, mask, design_mask, ar_mask=ar_mask,
+            )  # [B, N, 21]
+
+            log_p_token_all = torch.gather(log_probs_k, 2, S.unsqueeze(-1)).squeeze(-1)  # [B, N]
+            log_p_x_given_z_k = (log_p_token_all * design_mask).sum(dim=-1)  # [B]
+            log_p_x_given_z_terms.append(log_p_x_given_z_k)
+
+        log_p_x_given_z_stack = torch.stack(log_p_x_given_z_terms, dim=0)  # [K, B]
+        log_p_x = torch.logsumexp(log_p_x_given_z_stack, dim=0) - math.log(num_samples_eval)  # [B]
+        loglik_per_res = log_p_x / L_design
+        return loglik_per_res
+
     # ==================================================================
     # Conditional probabilities  (per-position, same as original)
     # ==================================================================

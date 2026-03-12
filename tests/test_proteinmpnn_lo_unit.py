@@ -128,6 +128,25 @@ def test_compute_loglik_is_q_is_finite() -> None:
     assert torch.isfinite(loglik).all()
 
 
+def test_compute_loglik_proxy_q_px_is_finite() -> None:
+    """Proxy log-likelihood estimate should be finite and have shape [B]."""
+    batch = _dummy_batch(b=2, l=20)
+    model = ProteinMPNN_LO(num_samples=2)
+    model.eval()
+    with torch.no_grad():
+        loglik = model.compute_loglik_proxy_q_px(
+            batch["X"],
+            batch["S"],
+            batch["mask"],
+            batch["chain_M"],
+            batch["residue_idx"],
+            batch["chain_encoding_all"],
+            num_samples_eval=4,
+        )
+    assert loglik.shape == (batch["S"].shape[0],)
+    assert torch.isfinite(loglik).all()
+
+
 def _dummy_batch_with_padding(b: int = 2, l: int = 32) -> dict[str, Any]:
     """Batch where sequences have different lengths (mask includes padding).
 
@@ -204,4 +223,23 @@ def test_compute_loglik_is_q_with_padding_is_finite() -> None:
         )
     assert loglik.shape == (batch["S"].shape[0],)
     assert torch.isfinite(loglik).all(), f"IS loglik contains non-finite: {loglik}"
+
+
+def test_compute_loglik_proxy_q_px_with_padding_is_finite() -> None:
+    """Proxy log-likelihood should work with padded batches."""
+    batch = _dummy_batch_with_padding()
+    model = ProteinMPNN_LO(num_samples=2)
+    model.eval()
+    with torch.no_grad():
+        loglik = model.compute_loglik_proxy_q_px(
+            batch["X"],
+            batch["S"],
+            batch["mask"],
+            batch["chain_M"],
+            batch["residue_idx"],
+            batch["chain_encoding_all"],
+            num_samples_eval=4,
+        )
+    assert loglik.shape == (batch["S"].shape[0],)
+    assert torch.isfinite(loglik).all(), f"Proxy loglik contains non-finite: {loglik}"
 

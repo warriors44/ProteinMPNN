@@ -195,7 +195,8 @@ def main(args: argparse.Namespace) -> None:
             f.write(
                 "epoch\tstep\ttime_s\t"
                 "train_elbo_loss\ttrain_nll\ttrain_ppl\ttrain_acc\t"
-                "valid_elbo_loss\tvalid_nll\tvalid_ppl\tvalid_acc\t"
+                "valid_elbo_loss\tvalid_nll_proxy\tvalid_ppl_proxy\tvalid_acc\t"
+                "valid_nll_isq\tvalid_ppl_isq\t"
                 "i_mean\tdelta_F_abs\n"
             )
 
@@ -315,6 +316,7 @@ def main(args: argparse.Namespace) -> None:
         loader_valid = StructureLoader(dataset_valid, batch_size=args.batch_size)
 
         reload_c = 0
+        best_valid_ppl_proxy = float("inf")
         for e0 in range(args.num_epochs):
             t0 = time.time()
             epoch_idx = start_epoch + e0
@@ -408,13 +410,17 @@ def main(args: argparse.Namespace) -> None:
 
                 total_step += 1
 
-            # Validation
+            # Validation: always proxy; full IS-q every interval (and epoch 1)
+            epoch_num = epoch_idx + 1
+            run_full_isq = (epoch_num % int(args.eval_full_interval) == 0) #or (epoch_num == 1)
             model.eval()
             valid_elbo_sum = 0.0
             valid_elbo_w = 0.0
-            valid_nll_sum = 0.0
+            valid_nll_proxy_sum = 0.0
+            valid_nll_isq_sum = 0.0
             valid_acc_sum = 0.0
             valid_w = 0.0
+            valid_isq_w = 0.0
 
             with torch.no_grad():
                 for _batch_idx, batch in enumerate(loader_valid):
@@ -426,8 +432,21 @@ def main(args: argparse.Namespace) -> None:
                     nll_diag, _ppl_diag, acc = _compute_nll_metrics(
                         model, X, S, mask, chain_M, residue_idx, chain_encoding_all,
                     )
-                    if args.eval_mode == "is_q":
-                        nll, ppl = _compute_isq_nll(
+                    proxy_loglik_per_res = model.compute_loglik_proxy_q_px(
+                        X,
+                        S,
+                        mask,
+                        chain_M,
+                        residue_idx,
+                        chain_encoding_all,
+                        num_samples_eval=int(args.proxy_num_samples),
+                    )  # [B]
+                    L_design = (mask * chain_M).sum(dim=-1).clamp(min=1.0)  # [B]
+                    proxy_nll = float(
+                        (-(proxy_loglik_per_res * L_design).sum() / (L_design.sum() + 1e-8)).detach().cpu().item()
+                    )
+                    if run_full_isq:
+                        nll_isq, _ppl_isq = _compute_isq_nll(
                             model,
                             X,
                             S,
@@ -437,23 +456,15 @@ def main(args: argparse.Namespace) -> None:
                             chain_encoding_all,
                             num_samples_eval=int(args.eval_num_samples),
                         )
-                    elif args.eval_mode == "mc_p":
-                        raise NotImplementedError(
-                            "eval_mode='mc_p' is not implemented yet for ProteinMPNN_LO. "
-                            "Planned: implement ProteinMPNN_LO.compute_loglik_mc_p(...) "
-                            "and call it here, mirroring struct2seq/struct2seq_lo.py.",
-                        )
-                    elif args.eval_mode == "nll":
-                        nll = nll_diag
-                        ppl = float(np.exp(nll))
-                    else:
-                        raise ValueError(f"Unknown eval_mode: {args.eval_mode!r}")
                     weight = float((mask * chain_M).sum().detach().cpu().item())
                     valid_elbo_sum += float(loss_elbo.detach().cpu().item()) * weight
                     valid_elbo_w += weight
-                    valid_nll_sum += nll * weight
+                    valid_nll_proxy_sum += proxy_nll * weight
                     valid_acc_sum += acc * weight
                     valid_w += weight
+                    if run_full_isq:
+                        valid_nll_isq_sum += nll_isq * weight
+                        valid_isq_w += weight
 
             train_elbo = train_elbo_sum / max(train_elbo_w, 1e-8)
             train_nll = train_nll_sum / max(train_w, 1e-8)
@@ -461,8 +472,14 @@ def main(args: argparse.Namespace) -> None:
             train_acc = train_acc_sum / max(train_w, 1e-8)
 
             valid_elbo = valid_elbo_sum / max(valid_elbo_w, 1e-8)
-            valid_nll = valid_nll_sum / max(valid_w, 1e-8)
-            valid_ppl = float(np.exp(valid_nll))
+            valid_nll_proxy = valid_nll_proxy_sum / max(valid_w, 1e-8)
+            valid_ppl_proxy = float(np.exp(valid_nll_proxy))
+            if run_full_isq:
+                valid_nll_isq = valid_nll_isq_sum / max(valid_isq_w, 1e-8)
+                valid_ppl_isq = float(np.exp(valid_nll_isq))
+            else:
+                valid_nll_isq = float("nan")
+                valid_ppl_isq = float("nan")
             valid_acc = valid_acc_sum / max(valid_w, 1e-8)
 
             i_mean = i_mean_sum / max(info_w, 1e-8)
@@ -475,15 +492,34 @@ def main(args: argparse.Namespace) -> None:
                 f.write(
                     f"{epoch_idx + 1}\t{total_step}\t{dt:.1f}\t"
                     f"{train_elbo:.6f}\t{train_nll:.6f}\t{train_ppl:.3f}\t{train_acc:.4f}\t"
-                    f"{valid_elbo:.6f}\t{valid_nll:.6f}\t{valid_ppl:.3f}\t{valid_acc:.4f}\t"
+                    f"{valid_elbo:.6f}\t{valid_nll_proxy:.6f}\t{valid_ppl_proxy:.3f}\t{valid_acc:.4f}\t"
+                    f"{valid_nll_isq:.6f}\t{valid_ppl_isq:.3f}\t"
                     f"{i_mean:.3f}\t{delta_f:.6f}\n"
                 )
             print(
                 f"epoch: {epoch_idx + 1}, step: {total_step}, time: {dt:.1f}s, "
                 f"train_elbo: {train_elbo:.4f}, valid_elbo: {valid_elbo:.4f}, "
-                f"train_ppl: {train_ppl:.3f}, valid_ppl: {valid_ppl:.3f}, "
+                f"train_ppl: {train_ppl:.3f}, valid_ppl_proxy: {valid_ppl_proxy:.3f}, "
+                f"valid_ppl_isq: {valid_ppl_isq:.3f}, "
                 f"train_acc: {train_acc:.3f}, valid_acc: {valid_acc:.3f}"
             )
+
+            if valid_ppl_proxy < best_valid_ppl_proxy:
+                best_valid_ppl_proxy = valid_ppl_proxy
+                ckpt_best = base_folder + "model_weights/epoch_best_proxy.pt"
+                torch.save(
+                    {
+                        "epoch": epoch_idx + 1,
+                        "step": total_step,
+                        "num_edges": args.num_neighbors,
+                        "noise_level": args.backbone_noise,
+                        "num_samples": args.num_lo_samples,
+                        "separate_q_decoder": bool(args.separate_q_decoder),
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.optimizer.state_dict(),
+                    },
+                    ckpt_best,
+                )
 
             ckpt_last = base_folder + "model_weights/epoch_last.pt"
             torch.save(
@@ -582,6 +618,18 @@ if __name__ == "__main__":
         type=int,
         default=8,
         help="Number of samples for eval_mode 'is_q' (and future 'mc_p').",
+    )
+    argparser.add_argument(
+        "--proxy_num_samples",
+        type=int,
+        default=8,
+        help="Number of q(z) samples for the fast proxy validation NLL/PPL.",
+    )
+    argparser.add_argument(
+        "--eval_full_interval",
+        type=int,
+        default=100,
+        help="Run full IS-q evaluation every N epochs (epoch 1 is always run).",
     )
 
     parsed = argparser.parse_args()
