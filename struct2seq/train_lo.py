@@ -27,6 +27,8 @@ def main() -> None:
             "train_lo.py requires --model_type structure_lo, "
             f"got {args.model_type!r}.",
         )
+    if args.eval_full_interval < 1:
+        raise ValueError("--eval_full_interval must be >= 1.")
 
     device = setup_device_rng(args)
 
@@ -89,7 +91,10 @@ def main() -> None:
 
     logfile = base_folder + 'log.txt'
     with open(logfile, 'w') as f:
-        f.write('Epoch\tTrain_PPL\tVal_PPL\tTrain_ELBO\tTrain_NLL\tVal_NLL\n')
+        f.write(
+            'Epoch\tTrain_PPL\tVal_PPL_Proxy\tVal_PPL_ISQ\t'
+            'Train_ELBO\tTrain_NLL\tVal_NLL_Proxy\tVal_NLL_ISQ\n'
+        )
     with open(base_folder + 'args.json', 'w') as f:
         json.dump(vars(args), f)
 
@@ -146,65 +151,86 @@ def main() -> None:
                     'optimizer_state_dict': optimizer.optimizer.state_dict(),
                 }, base_folder + 'checkpoints/epoch{}_step{}.pt'.format(e + 1, total_step))
 
-        # Validation
+        # Validation: always proxy; full IS-q every interval (and epoch 1)
+        epoch_num = e + 1
+        run_full_isq = (epoch_num == 1) or (epoch_num % args.eval_full_interval == 0)
         model.eval()
         with torch.no_grad():
-            val_sum, val_weights = 0., 0.
+            val_proxy_sum, val_proxy_weights = 0.0, 0.0
+            val_isq_sum, val_isq_weights = 0.0, 0.0
             for _, batch in enumerate(loader_validation):
                 X, S, mask, lengths = featurize(batch, device)
 
-                if args.eval_mode == 'is_q':
-                    loglik_per_res = model.compute_loglik_is_q(
+                # Lightweight proxy: q(z) samples + one p(x|z) forward per sample.
+                proxy_loglik_per_res = model.compute_loglik_proxy_q_px(
+                    X,
+                    S,
+                    lengths,
+                    mask,
+                    num_samples_eval=args.proxy_num_samples,
+                )
+                L_tensor_proxy = torch.tensor(
+                    lengths,
+                    dtype=torch.float32,
+                    device=proxy_loglik_per_res.device,
+                )
+                proxy_nll_batch = -(proxy_loglik_per_res * L_tensor_proxy).sum().cpu().item()
+                val_proxy_sum += proxy_nll_batch
+                val_proxy_weights += L_tensor_proxy.sum().cpu().item()
+
+                if run_full_isq:
+                    isq_loglik_per_res = model.compute_loglik_is_q(
                         X,
                         S,
                         lengths,
                         mask,
                         num_samples_eval=args.eval_num_samples,
                     )
-                    L_tensor = torch.tensor(
+                    L_tensor_isq = torch.tensor(
                         lengths,
                         dtype=torch.float32,
-                        device=loglik_per_res.device,
+                        device=isq_loglik_per_res.device,
                     )
-                    nll_batch = -(loglik_per_res * L_tensor).sum().cpu().item()
-                    val_sum += nll_batch
-                    val_weights += L_tensor.sum().cpu().item()
-                elif args.eval_mode == 'mc_p':
-                    loglik_per_res = model.compute_loglik_mc_p(
-                        X,
-                        S,
-                        lengths,
-                        mask,
-                        num_samples_eval=args.eval_num_samples,
-                    )
-                    L_tensor = torch.tensor(
-                        lengths,
-                        dtype=torch.float32,
-                        device=loglik_per_res.device,
-                    )
-                    nll_batch = -(loglik_per_res * L_tensor).sum().cpu().item()
-                    val_sum += nll_batch
-                    val_weights += L_tensor.sum().cpu().item()
-                else:
-                    log_probs = model(X, S, lengths, mask)
-                    loss_per_res, loss_avg = loss_nll(S, log_probs, mask)
-                    val_sum += torch.sum(loss_per_res * mask).cpu().item()
-                    val_weights += torch.sum(mask).cpu().item()
+                    isq_nll_batch = -(isq_loglik_per_res * L_tensor_isq).sum().cpu().item()
+                    val_isq_sum += isq_nll_batch
+                    val_isq_weights += L_tensor_isq.sum().cpu().item()
 
         train_elbo = train_elbo_sum / train_weights
         train_nll = train_nll_sum / train_weights
-        val_nll = val_sum / val_weights
-        val_ppl = np.exp(val_nll)
+        val_nll_proxy = val_proxy_sum / val_proxy_weights
+        val_ppl_proxy = np.exp(val_nll_proxy)
+        if run_full_isq:
+            val_nll_isq = val_isq_sum / val_isq_weights
+            val_ppl_isq = float(np.exp(val_nll_isq))
+        else:
+            val_nll_isq = float('nan')
+            val_ppl_isq = float('nan')
         train_ppl = np.exp(train_nll)
 
-        print('Epoch {} | Train ELBO {:.4f} | Train PPL {:.2f} | Val PPL {:.2f}'.format(
-            e + 1, train_elbo, train_ppl, val_ppl,
-        ))
+        print(
+            'Epoch {} | Train ELBO {:.4f} | Train PPL {:.2f} | '
+            'Val Proxy PPL {:.2f} | Val ISQ PPL {}'.format(
+                epoch_num,
+                train_elbo,
+                train_ppl,
+                val_ppl_proxy,
+                '{:.2f}'.format(val_ppl_isq) if run_full_isq else 'nan',
+            )
+        )
 
         with open(logfile, 'a') as f:
-            f.write('{}\t{}\t{}\t{:.4f}\t{:.4f}\t{:.4f}\n'.format(
-                e + 1, train_ppl, val_ppl, train_elbo, train_nll, val_nll,
-            ))
+            f.write(
+                '{}\t{}\t{}\t{}\t{:.4f}\t{:.4f}\t{:.4f}\t{}\n'.format(
+                    epoch_num,
+                    train_ppl,
+                    val_ppl_proxy,
+                    val_ppl_isq,
+                    train_elbo,
+                    train_nll,
+                    val_nll_proxy,
+                    val_nll_isq,
+                )
+            )
 
         ckpt = base_folder + 'checkpoints/epoch{}_step{}.pt'.format(e + 1, total_step)
         torch.save({
@@ -214,70 +240,75 @@ def main() -> None:
             'optimizer_state_dict': optimizer.optimizer.state_dict(),
         }, ckpt)
 
-        epoch_losses_valid.append(val_ppl)
+        epoch_losses_valid.append(val_ppl_proxy)
         epoch_checkpoints.append(ckpt)
 
     # Best model
     best_idx = int(np.argmin(epoch_losses_valid))
     best_ckpt = epoch_checkpoints[best_idx]
     best_copy = base_folder + 'best_checkpoint_epoch{}.pt'.format(best_idx + 1)
-    best_validation_ppl = epoch_losses_valid[best_idx]
+    best_validation_ppl_proxy = epoch_losses_valid[best_idx]
     best_train_ppl = np.exp(train_nll_sum / train_weights)
     shutil.copy(best_ckpt, best_copy)
     load_checkpoint(best_copy, model)
 
-    # Test
+    # Test: compute both proxy and full IS-q
     model.eval()
     with torch.no_grad():
-        test_sum, test_weights = 0., 0.
+        test_proxy_sum, test_proxy_weights = 0.0, 0.0
+        test_isq_sum, test_isq_weights = 0.0, 0.0
         for _, batch in enumerate(loader_test):
             X, S, mask, lengths = featurize(batch, device)
 
-            if args.eval_mode == 'is_q':
-                loglik_per_res = model.compute_loglik_is_q(
-                    X,
-                    S,
-                    lengths,
-                    mask,
-                    num_samples_eval=args.eval_num_samples,
-                )
-                L_tensor = torch.tensor(
-                    lengths,
-                    dtype=torch.float32,
-                    device=loglik_per_res.device,
-                )
-                nll_batch = -(loglik_per_res * L_tensor).sum().cpu().item()
-                test_sum += nll_batch
-                test_weights += L_tensor.sum().cpu().item()
-            elif args.eval_mode == 'mc_p':
-                loglik_per_res = model.compute_loglik_mc_p(
-                    X,
-                    S,
-                    lengths,
-                    mask,
-                    num_samples_eval=args.eval_num_samples,
-                )
-                L_tensor = torch.tensor(
-                    lengths,
-                    dtype=torch.float32,
-                    device=loglik_per_res.device,
-                )
-                nll_batch = -(loglik_per_res * L_tensor).sum().cpu().item()
-                test_sum += nll_batch
-                test_weights += L_tensor.sum().cpu().item()
-            else:
-                log_probs = model(X, S, lengths, mask)
-                loss_per_res, _ = loss_nll(S, log_probs, mask)
-                test_sum += torch.sum(loss_per_res * mask).cpu().item()
-                test_weights += torch.sum(mask).cpu().item()
+            proxy_loglik_per_res = model.compute_loglik_proxy_q_px(
+                X,
+                S,
+                lengths,
+                mask,
+                num_samples_eval=args.proxy_num_samples,
+            )
+            L_tensor_proxy = torch.tensor(
+                lengths,
+                dtype=torch.float32,
+                device=proxy_loglik_per_res.device,
+            )
+            proxy_nll_batch = -(proxy_loglik_per_res * L_tensor_proxy).sum().cpu().item()
+            test_proxy_sum += proxy_nll_batch
+            test_proxy_weights += L_tensor_proxy.sum().cpu().item()
 
-    test_ppl = np.exp(test_sum / test_weights)
-    print('Perplexity\tTest:{}'.format(test_ppl))
+            isq_loglik_per_res = model.compute_loglik_is_q(
+                X,
+                S,
+                lengths,
+                mask,
+                num_samples_eval=args.eval_num_samples,
+            )
+            L_tensor_isq = torch.tensor(
+                lengths,
+                dtype=torch.float32,
+                device=isq_loglik_per_res.device,
+            )
+            isq_nll_batch = -(isq_loglik_per_res * L_tensor_isq).sum().cpu().item()
+            test_isq_sum += isq_nll_batch
+            test_isq_weights += L_tensor_isq.sum().cpu().item()
+
+    test_ppl_proxy = np.exp(test_proxy_sum / test_proxy_weights)
+    test_ppl_isq = np.exp(test_isq_sum / test_isq_weights)
+    print('Perplexity\tTest Proxy:{}\tTest ISQ:{}'.format(
+        test_ppl_proxy, test_ppl_isq,
+    ))
 
     with open(base_folder + 'results.txt', 'w') as f:
-        f.write('Best epoch: {}\nPerplexities:\n\tTrain: {}\n\tValidation: {}\n\tTest: {}'.format(
-            best_idx + 1, best_train_ppl, best_validation_ppl, test_ppl,
-        ))
+        f.write(
+            'Best epoch (proxy): {}\nPerplexities:\n\tTrain: {}\n\tValidation Proxy: {}\n'
+            '\tTest Proxy: {}\n\tTest ISQ: {}'.format(
+                best_idx + 1,
+                best_train_ppl,
+                best_validation_ppl_proxy,
+                test_ppl_proxy,
+                test_ppl_isq,
+            )
+        )
 
 
 if __name__ == '__main__':

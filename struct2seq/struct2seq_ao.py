@@ -383,15 +383,24 @@ class Struct2SeqAO(nn.Module):
         S: torch.Tensor,
         L: np.ndarray,
         mask: torch.Tensor,
+        permutation: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Standard forward pass using sequential (N->C) ordering.
 
         This matches the original Struct2Seq interface and is used for
         evaluation / validation NLL.
         """
-        B, N = S.shape
-        device = S.device
-        permutation = torch.arange(N, device=device).unsqueeze(0).expand(B, -1)
+        if permutation is None:
+            B, N = S.shape
+            device = S.device
+            permutation = torch.arange(N, device=device).unsqueeze(0).expand(B, -1)
+        else:
+            if permutation.dim() != 2:
+                raise ValueError("permutation must be a [B, N] tensor")
+            if permutation.shape != S.shape:
+                raise ValueError(
+                    f"permutation shape {tuple(permutation.shape)} must match S shape {tuple(S.shape)}"
+                )
 
         h_V_enc, h_E, E_idx, _ = self._encode(X, L, mask)
         log_probs, _ = self.forward_p(h_V_enc, h_E, E_idx, S, mask, permutation)
