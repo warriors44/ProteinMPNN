@@ -523,13 +523,14 @@ class ProteinMPNN_LO(nn.Module):
         q_logits = self.forward_q(h_V_enc, h_E, E_idx, S, mask, design_mask)
 
         L_design = design_mask.sum(dim=-1).clamp(min=1.0)
-        num_fixed = ((1.0 - design_mask) * mask).sum(dim=-1).long()
+        num_non_design = N - design_mask.sum(dim=-1).long()
 
         # Sample i_design ~ Uniform(1, ..., L_designable).
-        # In the full permutation, designable positions start after fixed ones,
-        # so the absolute index is i_full = i_design + num_fixed.
+        # In the full permutation, _build_fixed_first_perm places all
+        # non-designable positions (fixed + padding) first, so designable
+        # positions start at step num_non_design (= N - L_design).
         i_design = (torch.rand(B, device=device) * L_design).long() + 1
-        i_full = i_design + num_fixed
+        i_full = i_design + num_non_design
 
         F_values: List[torch.Tensor] = []
         log_q_values: List[torch.Tensor] = []
@@ -561,9 +562,9 @@ class ProteinMPNN_LO(nn.Module):
             F_values.append(F_k)
 
             log_q_all = plackett_luce_log_prob(q_logits, full_perm, mask)
-            # Only sum over designable steps (after fixed positions, before i_full)
+            # Only sum over designable steps (after non-design positions, before i_full)
             step_mask = (
-                (step_indices >= num_fixed.unsqueeze(1))
+                (step_indices >= num_non_design.unsqueeze(1))
                 & (step_indices < (i_full - 1).unsqueeze(1))
             ).float()
             # Fixed position steps have -inf log_q; zero them out
@@ -1168,8 +1169,8 @@ class ProteinMPNN_LO(nn.Module):
         B, N = S.shape
         device = S.device
 
-        num_fixed = ((1.0 - design_mask) * mask).sum(dim=-1).long()
         L_design_int = design_mask.sum(dim=-1).long()
+        num_non_design = N - L_design_int
         max_design = int(L_design_int.max().item())
 
         rank = torch.zeros(B, N, dtype=torch.long, device=device)
@@ -1182,8 +1183,9 @@ class ProteinMPNN_LO(nn.Module):
         log_p_x_given_z = torch.zeros(B, device=device)
 
         for d in range(max_design):
-            step = num_fixed + d
-            i_samples = step + 1
+            step = num_non_design + d
+            step_clamped = step.clamp(max=N - 1)
+            i_samples = step_clamped + 1
 
             active = (d < L_design_int).float()
 
@@ -1192,14 +1194,14 @@ class ProteinMPNN_LO(nn.Module):
                 h_V_enc, h_E, E_idx, S, mask, design_mask, ar_mask=ar_mask,
             )
 
-            remaining = (rank >= step.unsqueeze(1)).float() * design_mask
+            remaining = (rank >= step_clamped.unsqueeze(1)).float() * design_mask
 
             log_p_order = F.log_softmax(
                 p_order_logits_step.masked_fill(remaining == 0, float('-inf')),
                 dim=-1,
             )
 
-            z_i = torch.gather(full_perm, 1, step.unsqueeze(1))
+            z_i = torch.gather(full_perm, 1, step_clamped.unsqueeze(1))
             log_p_zi = torch.gather(log_p_order, 1, z_i).squeeze(1)
             log_p_z = log_p_z + log_p_zi * active
 

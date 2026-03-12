@@ -127,3 +127,81 @@ def test_compute_loglik_is_q_is_finite() -> None:
     assert loglik.shape == (batch["S"].shape[0],)
     assert torch.isfinite(loglik).all()
 
+
+def _dummy_batch_with_padding(b: int = 2, l: int = 32) -> dict[str, Any]:
+    """Batch where sequences have different lengths (mask includes padding).
+
+    Batch element 0: length 32 (full), 5 fixed positions
+    Batch element 1: length 20 (12 padding positions), 5 fixed positions
+
+    This means for element 1:
+      num_fixed = 5, but num_non_design = N - L_design = 32 - 15 = 17
+    The gap (17 - 5 = 12) is the padding count.
+    """
+    x = torch.randn(b, l, 4, 3)
+    s = torch.randint(0, 21, (b, l))
+    mask = torch.ones(b, l)
+    mask[1, 20:] = 0.0
+
+    chain_m = torch.ones(b, l)
+    chain_m[:, :5] = 0.0
+    chain_m[1, 20:] = 0.0
+
+    residue_idx = torch.arange(l).unsqueeze(0).repeat(b, 1)
+    chain_encoding_all = torch.ones(b, l)
+    return {
+        "X": x,
+        "S": s,
+        "mask": mask,
+        "chain_M": chain_m,
+        "residue_idx": residue_idx,
+        "chain_encoding_all": chain_encoding_all,
+    }
+
+
+def test_compute_elbo_with_padding_is_finite() -> None:
+    """compute_elbo() should work correctly when batch has variable-length
+    sequences with padding (mask=0 for padded positions)."""
+    batch = _dummy_batch_with_padding()
+    model = ProteinMPNN_LO(num_samples=2)
+    model.train()
+
+    loss, info = model.compute_elbo(
+        batch["X"],
+        batch["S"],
+        batch["mask"],
+        batch["chain_M"],
+        batch["residue_idx"],
+        batch["chain_encoding_all"],
+    )
+    assert torch.isfinite(loss), f"ELBO loss is not finite: {loss}"
+    assert "elbo" in info
+    loss.backward()
+
+    has_grad = any(p.grad is not None for p in model.parameters())
+    assert has_grad
+
+
+def test_compute_loglik_is_q_with_padding_is_finite() -> None:
+    """IS log-likelihood should not crash with padded batches.
+
+    This test specifically exercises the num_non_design offset fix:
+    without the fix, step = num_fixed + d overflows N for the shorter
+    sequence, causing an index-out-of-bounds error in torch.gather.
+    """
+    batch = _dummy_batch_with_padding()
+    model = ProteinMPNN_LO(num_samples=2)
+    model.eval()
+    with torch.no_grad():
+        loglik = model.compute_loglik_is_q(
+            batch["X"],
+            batch["S"],
+            batch["mask"],
+            batch["chain_M"],
+            batch["residue_idx"],
+            batch["chain_encoding_all"],
+            num_samples_eval=4,
+        )
+    assert loglik.shape == (batch["S"].shape[0],)
+    assert torch.isfinite(loglik).all(), f"IS loglik contains non-finite: {loglik}"
+
