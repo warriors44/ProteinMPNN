@@ -377,12 +377,11 @@ def main(args: argparse.Namespace) -> None:
                             X, S, mask, chain_M, residue_idx, chain_encoding_all,
                         )
                     scaler.scale(loss_elbo).backward()
+                    scaler.unscale_(optimizer)
                     if args.gradient_norm > 0.0:
                         total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradient_norm)
                         grad_norm_sum += float(total_norm.detach().cpu().item())
                         grad_norm_w += 1.0
-                    # Use NoamOpt wrapper here so its step() (with learning rate
-                    # schedule) is invoked, matching training/training.py.
                     scaler.step(optimizer)
                     scaler.update()
                 else:

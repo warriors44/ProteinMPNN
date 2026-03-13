@@ -405,6 +405,7 @@ def main(args: argparse.Namespace) -> None:
                             X, S, mask, chain_M, residue_idx, chain_encoding_all,
                         )
                     scaler.scale(loss_elbo).backward()
+                    scaler.unscale_(optimizer)
                     if args.gradient_norm > 0.0:
                         total_norm = torch.nn.utils.clip_grad_norm_(
                             model.parameters(), args.gradient_norm,
