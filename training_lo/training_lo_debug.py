@@ -216,6 +216,22 @@ def main(args: argparse.Namespace) -> None:
                 "i_mean\tdelta_F_abs\tgrad_norm\n"
             )
 
+    # Nonfinite debug log: event/statistics log to diagnose NaN/inf root causes.
+    nonfinite_logfile = base_folder + "log_nonfinite_debug.txt"
+    nonfinite_header = (
+        "epoch\tstep\ttime_s\t"
+        "scaler_scale_before\tscaler_scale_after\tstep_skipped\t"
+        "loss_isfinite\tgrad_nonfinite_count\t"
+        "design_sum_min\tdesign_sum_max\tdesign_zero_count\t"
+        "remaining_sum_min\tremaining_sum_max\tremaining_zero_count\t"
+        "all_neg_inf_rows_count\t"
+        "any_nonfinite_F\tany_nonfinite_log_q\tany_nonfinite_log_probs\tany_nonfinite_p_order_logits\n"
+    )
+    if not args.previous_checkpoint:
+        with open(nonfinite_logfile, "w") as f:
+            f.write(nonfinite_header)
+    first_nonfinite_dumped = False
+
     # ------------------------------------------------------------------
     # Data pipeline (same as training/training.py)
     # ------------------------------------------------------------------
@@ -400,12 +416,21 @@ def main(args: argparse.Namespace) -> None:
 
                 optimizer.zero_grad()
                 if scaler.is_enabled():
+                    scaler_scale_before = float(scaler.get_scale())
                     with autocast():
                         loss_elbo, info = model.compute_elbo(
                             X, S, mask, chain_M, residue_idx, chain_encoding_all,
+                            return_debug=True,
                         )
                     scaler.scale(loss_elbo).backward()
                     scaler.unscale_(optimizer)
+                    # Detect nonfinite gradients after unscale (indicates backward overflow or NaN propagation).
+                    grad_nonfinite_count = 0
+                    for p in model.parameters():
+                        if p.grad is None:
+                            continue
+                        if not torch.isfinite(p.grad).all():
+                            grad_nonfinite_count += 1
                     if args.gradient_norm > 0.0:
                         total_norm = torch.nn.utils.clip_grad_norm_(
                             model.parameters(), args.gradient_norm,
@@ -415,11 +440,21 @@ def main(args: argparse.Namespace) -> None:
                         grad_norm_w += 1.0
                     scaler.step(optimizer)
                     scaler.update()
+                    scaler_scale_after = float(scaler.get_scale())
+                    step_skipped = int(scaler_scale_after < scaler_scale_before)
                 else:
+                    scaler_scale_before = float("nan")
                     loss_elbo, info = model.compute_elbo(
                         X, S, mask, chain_M, residue_idx, chain_encoding_all,
+                        return_debug=True,
                     )
                     loss_elbo.backward()
+                    grad_nonfinite_count = 0
+                    for p in model.parameters():
+                        if p.grad is None:
+                            continue
+                        if not torch.isfinite(p.grad).all():
+                            grad_nonfinite_count += 1
                     if args.gradient_norm > 0.0:
                         total_norm = torch.nn.utils.clip_grad_norm_(
                             model.parameters(), args.gradient_norm,
@@ -428,6 +463,8 @@ def main(args: argparse.Namespace) -> None:
                         grad_norm_sum += grad_norm_value
                         grad_norm_w += 1.0
                     optimizer.step()
+                    scaler_scale_after = float("nan")
+                    step_skipped = 0
 
                 # Diagnostic NLL metrics (no grad)
                 with torch.no_grad():
@@ -455,6 +492,59 @@ def main(args: argparse.Namespace) -> None:
 
                 total_step += 1
 
+                # Nonfinite debug statistics log (event-based but lightweight enough to write each step).
+                dt_cur = float(time.time() - t0)
+                # Pull debug stats from info (present when return_debug=True).
+                loss_isfinite = float(info.get("dbg_loss_isfinite", torch.tensor(0.0)).detach().cpu().item())
+                design_sum_min = float(info.get("dbg_design_sum_min", torch.tensor(float("nan"))).detach().cpu().item())
+                design_sum_max = float(info.get("dbg_design_sum_max", torch.tensor(float("nan"))).detach().cpu().item())
+                design_zero_count = float(info.get("dbg_design_zero_count", torch.tensor(float("nan"))).detach().cpu().item())
+                remaining_sum_min = float(info.get("dbg_remaining_sum_min", torch.tensor(float("nan"))).detach().cpu().item())
+                remaining_sum_max = float(info.get("dbg_remaining_sum_max", torch.tensor(float("nan"))).detach().cpu().item())
+                remaining_zero_count = float(info.get("dbg_remaining_zero_count", torch.tensor(float("nan"))).detach().cpu().item())
+                all_neg_inf_rows_count = float(info.get("dbg_all_neg_inf_rows_count", torch.tensor(float("nan"))).detach().cpu().item())
+                any_nonfinite_F = float(info.get("dbg_any_nonfinite_F", torch.tensor(float("nan"))).detach().cpu().item())
+                any_nonfinite_log_q = float(info.get("dbg_any_nonfinite_log_q", torch.tensor(float("nan"))).detach().cpu().item())
+                any_nonfinite_log_probs = float(info.get("dbg_any_nonfinite_log_probs", torch.tensor(float("nan"))).detach().cpu().item())
+                any_nonfinite_p_order_logits = float(info.get("dbg_any_nonfinite_p_order_logits", torch.tensor(float("nan"))).detach().cpu().item())
+
+                with open(nonfinite_logfile, "a") as nf:
+                    nf.write(
+                        f"{epoch_idx + 1}\t{total_step}\t{dt_cur:.1f}\t"
+                        f"{scaler_scale_before:.1f}\t{scaler_scale_after:.1f}\t{step_skipped}\t"
+                        f"{loss_isfinite:.0f}\t{grad_nonfinite_count}\t"
+                        f"{design_sum_min:.0f}\t{design_sum_max:.0f}\t{design_zero_count:.0f}\t"
+                        f"{remaining_sum_min:.0f}\t{remaining_sum_max:.0f}\t{remaining_zero_count:.0f}\t"
+                        f"{all_neg_inf_rows_count:.0f}\t"
+                        f"{any_nonfinite_F:.0f}\t{any_nonfinite_log_q:.0f}\t{any_nonfinite_log_probs:.0f}\t{any_nonfinite_p_order_logits:.0f}\n"
+                    )
+
+                # One-time detailed dump on first sign of nonfinite behavior.
+                nonfinite_trigger = (
+                    (loss_isfinite == 0.0)
+                    or (grad_nonfinite_count > 0)
+                    or (design_zero_count > 0)
+                    or (remaining_zero_count > 0)
+                    or (any_nonfinite_F > 0)
+                    or (any_nonfinite_log_q > 0)
+                    or (any_nonfinite_log_probs > 0)
+                    or (any_nonfinite_p_order_logits > 0)
+                    or (step_skipped > 0)
+                )
+                if (not first_nonfinite_dumped) and nonfinite_trigger:
+                    first_nonfinite_dumped = True
+                    with open(nonfinite_logfile, "a") as nf:
+                        nf.write(
+                            "FIRST_EVENT\t"
+                            f"epoch={epoch_idx + 1}\tstep={total_step}\t"
+                            f"loss_isfinite={loss_isfinite:.0f}\t"
+                            f"grad_nonfinite_count={grad_nonfinite_count}\t"
+                            f"design_zero_count={design_zero_count:.0f}\t"
+                            f"remaining_zero_count={remaining_zero_count:.0f}\t"
+                            f"all_neg_inf_rows_count={all_neg_inf_rows_count:.0f}\t"
+                            f"step_skipped={step_skipped}\n"
+                        )
+
                 # Optional step-level debug log (training side only; val fields set to nan).
                 if args.debug_log_interval > 0 and (total_step % args.debug_log_interval == 0):
                     train_elbo_cur = train_elbo_sum / max(train_elbo_w, 1e-8)
@@ -464,7 +554,6 @@ def main(args: argparse.Namespace) -> None:
                     i_mean_cur = i_mean_sum / max(info_w, 1e-8)
                     delta_f_cur = delta_f_sum / max(info_w, 1e-8)
                     grad_norm_avg_cur = grad_norm_sum / max(grad_norm_w, 1.0)
-                    dt_cur = float(time.time() - t0)
 
                     with open(debug_logfile, "a") as df:
                         df.write(

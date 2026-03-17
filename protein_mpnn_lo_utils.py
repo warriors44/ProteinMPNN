@@ -508,6 +508,8 @@ class ProteinMPNN_LO(nn.Module):
         chain_M: torch.Tensor,
         residue_idx: torch.Tensor,
         chain_encoding_all: torch.Tensor,
+        *,
+        return_debug: bool = False,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """ELBO loss following Algorithm 1 of Wang et al. (arXiv:2503.05979).
 
@@ -518,6 +520,8 @@ class ProteinMPNN_LO(nn.Module):
             chain_M: chain design mask [B, L] (1 = designable).
             residue_idx: residue indices [B, L].
             chain_encoding_all: chain encoding [B, L].
+            return_debug: If True, include extra debug statistics in the
+                returned info dict to help diagnose NaN/inf issues.
 
         Returns:
             loss: scalar loss to minimise.
@@ -547,6 +551,17 @@ class ProteinMPNN_LO(nn.Module):
         K = self.num_samples
         step_indices = torch.arange(N, device=device).unsqueeze(0)
 
+        # Optional debug statistics for diagnosing nonfinite values.
+        dbg_remaining_sum_min = torch.full((B,), float("inf"), device=device)
+        dbg_remaining_sum_max = torch.full((B,), float("-inf"), device=device)
+        dbg_remaining_zero_count = torch.zeros((), device=device)
+        dbg_all_neg_inf_rows_count = torch.zeros((), device=device)
+        dbg_any_nonfinite_F = torch.zeros((), device=device)
+        # Note: -inf can be legitimate due to masking; we treat NaN/+inf as "bad".
+        dbg_any_bad_log_q = torch.zeros((), device=device)
+        dbg_any_bad_log_probs = torch.zeros((), device=device)
+        dbg_any_bad_p_order_logits = torch.zeros((), device=device)
+
         for _ in range(K):
             full_perm = self._build_fixed_first_perm(
                 design_mask, mask, q_logits.detach(),
@@ -565,12 +580,41 @@ class ProteinMPNN_LO(nn.Module):
             decoded_mask = (rank < (i_full - 1).unsqueeze(1)).float()
             remaining_mask = (1.0 - decoded_mask) * design_mask
 
+            if return_debug:
+                remaining_sum = remaining_mask.sum(dim=-1)  # [B]
+                dbg_remaining_sum_min = torch.minimum(dbg_remaining_sum_min, remaining_sum)
+                dbg_remaining_sum_max = torch.maximum(dbg_remaining_sum_max, remaining_sum)
+                dbg_remaining_zero_count = dbg_remaining_zero_count + (remaining_sum == 0).float().sum()
+
+                masked_p_logits = p_order_logits_k.masked_fill(remaining_mask == 0, float("-inf"))
+                all_neg_inf_rows = torch.isneginf(masked_p_logits).all(dim=-1)  # [B]
+                dbg_all_neg_inf_rows_count = dbg_all_neg_inf_rows_count + all_neg_inf_rows.float().sum()
+
             F_k = self._compute_F_theta(
                 log_probs_k, p_order_logits_k, q_logits, S, remaining_mask,
             )
             F_values.append(F_k)
 
+            if return_debug:
+                dbg_any_nonfinite_F = torch.maximum(
+                    dbg_any_nonfinite_F,
+                    (~torch.isfinite(F_k)).any().float(),
+                )
+                dbg_any_bad_log_probs = torch.maximum(
+                    dbg_any_bad_log_probs,
+                    (torch.isnan(log_probs_k) | torch.isposinf(log_probs_k)).any().float(),
+                )
+                dbg_any_bad_p_order_logits = torch.maximum(
+                    dbg_any_bad_p_order_logits,
+                    (torch.isnan(p_order_logits_k) | torch.isposinf(p_order_logits_k)).any().float(),
+                )
+
             log_q_all = plackett_luce_log_prob(q_logits, full_perm, mask)
+            if return_debug:
+                dbg_any_bad_log_q = torch.maximum(
+                    dbg_any_bad_log_q,
+                    (torch.isnan(log_q_all) | torch.isposinf(log_q_all)).any().float(),
+                )
             # Only sum over designable steps (after non-design positions, before i_full)
             step_mask = (
                 (step_indices >= num_non_design.unsqueeze(1))
@@ -616,6 +660,25 @@ class ProteinMPNN_LO(nn.Module):
             'delta_F_abs': delta_F_abs,
             'i_mean': i_design.float().mean(),
         }
+
+        if return_debug:
+            design_sum = design_mask.sum(dim=-1)  # [B]
+            info.update(
+                {
+                    "dbg_design_sum_min": design_sum.min(),
+                    "dbg_design_sum_max": design_sum.max(),
+                    "dbg_design_zero_count": (design_sum == 0).float().sum(),
+                    "dbg_remaining_sum_min": dbg_remaining_sum_min.min(),
+                    "dbg_remaining_sum_max": dbg_remaining_sum_max.max(),
+                    "dbg_remaining_zero_count": dbg_remaining_zero_count,
+                    "dbg_all_neg_inf_rows_count": dbg_all_neg_inf_rows_count,
+                    "dbg_any_nonfinite_F": dbg_any_nonfinite_F,
+                    "dbg_any_nonfinite_log_q": dbg_any_bad_log_q,
+                    "dbg_any_nonfinite_log_probs": dbg_any_bad_log_probs,
+                    "dbg_any_nonfinite_p_order_logits": dbg_any_bad_p_order_logits,
+                    "dbg_loss_isfinite": torch.isfinite(loss).float(),
+                }
+            )
         return loss, info
 
     # ==================================================================
