@@ -760,7 +760,7 @@ if __name__ == "__main__":
     argparser.add_argument("--rescut", type=float, default=3.5, help="PDB resolution cutoff.")
     argparser.add_argument("--debug", type=bool, default=False, help="Minimal data loading for debugging.")
     argparser.add_argument("--gradient_norm", type=float, default=1.0, help="Clip gradient norm, negative to disable.")
-    argparser.add_argument("--mixed_precision", type=bool, default=True, help="Train with mixed precision.")
+    argparser.add_argument("--mixed_precision", action="store_true", help="Train with mixed precision.")
 
     # LO-ARM specific
     argparser.add_argument("--num_lo_samples", type=int, default=2, help="Number of RLOO samples K (>=2).")
