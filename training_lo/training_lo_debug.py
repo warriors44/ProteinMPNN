@@ -225,7 +225,7 @@ def main(args: argparse.Namespace) -> None:
         "design_sum_min\tdesign_sum_max\tdesign_zero_count\t"
         "remaining_sum_min\tremaining_sum_max\tremaining_zero_count\t"
         "all_neg_inf_rows_count\t"
-        "any_nonfinite_F\tany_nonfinite_log_q\tany_nonfinite_log_probs\tany_nonfinite_p_order_logits\n"
+        "any_nonfinite_F\tany_nonfinite_log_q\tany_nonfinite_q_logits\tany_nonfinite_log_probs\tany_nonfinite_p_order_logits\n"
     )
     if not args.previous_checkpoint:
         with open(nonfinite_logfile, "w") as f:
@@ -505,6 +505,7 @@ def main(args: argparse.Namespace) -> None:
                 all_neg_inf_rows_count = float(info.get("dbg_all_neg_inf_rows_count", torch.tensor(float("nan"))).detach().cpu().item())
                 any_nonfinite_F = float(info.get("dbg_any_nonfinite_F", torch.tensor(float("nan"))).detach().cpu().item())
                 any_nonfinite_log_q = float(info.get("dbg_any_nonfinite_log_q", torch.tensor(float("nan"))).detach().cpu().item())
+                any_nonfinite_q_logits = float(info.get("dbg_any_nonfinite_q_logits", torch.tensor(float("nan"))).detach().cpu().item())
                 any_nonfinite_log_probs = float(info.get("dbg_any_nonfinite_log_probs", torch.tensor(float("nan"))).detach().cpu().item())
                 any_nonfinite_p_order_logits = float(info.get("dbg_any_nonfinite_p_order_logits", torch.tensor(float("nan"))).detach().cpu().item())
 
@@ -516,7 +517,7 @@ def main(args: argparse.Namespace) -> None:
                         f"{design_sum_min:.0f}\t{design_sum_max:.0f}\t{design_zero_count:.0f}\t"
                         f"{remaining_sum_min:.0f}\t{remaining_sum_max:.0f}\t{remaining_zero_count:.0f}\t"
                         f"{all_neg_inf_rows_count:.0f}\t"
-                        f"{any_nonfinite_F:.0f}\t{any_nonfinite_log_q:.0f}\t{any_nonfinite_log_probs:.0f}\t{any_nonfinite_p_order_logits:.0f}\n"
+                        f"{any_nonfinite_F:.0f}\t{any_nonfinite_log_q:.0f}\t{any_nonfinite_q_logits:.0f}\t{any_nonfinite_log_probs:.0f}\t{any_nonfinite_p_order_logits:.0f}\n"
                     )
 
                 # One-time detailed dump on first sign of nonfinite behavior.
@@ -527,6 +528,7 @@ def main(args: argparse.Namespace) -> None:
                     or (remaining_zero_count > 0)
                     or (any_nonfinite_F > 0)
                     or (any_nonfinite_log_q > 0)
+                    or (any_nonfinite_q_logits > 0)
                     or (any_nonfinite_log_probs > 0)
                     or (any_nonfinite_p_order_logits > 0)
                     or (step_skipped > 0)
@@ -542,6 +544,7 @@ def main(args: argparse.Namespace) -> None:
                             f"design_zero_count={design_zero_count:.0f}\t"
                             f"remaining_zero_count={remaining_zero_count:.0f}\t"
                             f"all_neg_inf_rows_count={all_neg_inf_rows_count:.0f}\t"
+                            f"any_nonfinite_q_logits={any_nonfinite_q_logits:.0f}\t"
                             f"step_skipped={step_skipped}\n"
                         )
 

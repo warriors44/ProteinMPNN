@@ -565,6 +565,15 @@ class ProteinMPNN_LO(nn.Module):
         dbg_any_bad_log_q = torch.zeros((), device=device)
         dbg_any_bad_log_probs = torch.zeros((), device=device)
         dbg_any_bad_p_order_logits = torch.zeros((), device=device)
+        dbg_any_nonfinite_q_logits = torch.zeros((), device=device)
+
+        if return_debug:
+            # q_logits are expected to be -inf for non-designable positions.
+            # We only flag non-finite values (NaN/inf) inside designable positions.
+            design_bool = design_mask.bool()
+            dbg_any_nonfinite_q_logits = (
+                (~torch.isfinite(q_logits)) & design_bool
+            ).any().float()
 
         for _ in range(K):
             full_perm = self._build_fixed_first_perm(
@@ -680,6 +689,7 @@ class ProteinMPNN_LO(nn.Module):
                     "dbg_any_nonfinite_log_q": dbg_any_bad_log_q,
                     "dbg_any_nonfinite_log_probs": dbg_any_bad_log_probs,
                     "dbg_any_nonfinite_p_order_logits": dbg_any_bad_p_order_logits,
+                    "dbg_any_nonfinite_q_logits": dbg_any_nonfinite_q_logits,
                     "dbg_loss_isfinite": torch.isfinite(loss).float(),
                 }
             )
