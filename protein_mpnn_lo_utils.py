@@ -364,7 +364,9 @@ class ProteinMPNN_LO(nn.Module):
             h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
             h_V = dec_layer(h_V, h_ESV, mask_V=mask, mask_attend=mask_attend)
 
-        q_logits = order_head(h_V).squeeze(-1)
+        # Cast to float32 before the order head to prevent FP16 overflow
+        # (logcumsumexp(inf) - inf = NaN under autocast).
+        q_logits = order_head(h_V.float()).squeeze(-1)
         q_logits = q_logits.masked_fill(design_mask == 0, float('-inf'))
         return q_logits
 
@@ -427,7 +429,9 @@ class ProteinMPNN_LO(nn.Module):
         logits = self.W_out(h_V)
         log_probs = F.log_softmax(logits, dim=-1)
 
-        p_order_logits = self.W_order_p(h_V).squeeze(-1)
+        # Cast to float32 before the order head to prevent FP16 overflow
+        # (logcumsumexp(inf) - inf = NaN under autocast).
+        p_order_logits = self.W_order_p(h_V.float()).squeeze(-1)
         p_order_logits = p_order_logits.masked_fill(design_mask == 0, float('-inf'))
 
         return log_probs, p_order_logits
