@@ -147,6 +147,7 @@ class ProteinMPNN_LO(nn.Module):
         self.node_features = node_features
         self.edge_features = edge_features
         self.hidden_dim = hidden_dim
+        self.num_letters = num_letters
         self.num_samples = num_samples
         self.separate_q_decoder = separate_q_decoder
         self.ca_only = ca_only
@@ -179,20 +180,18 @@ class ProteinMPNN_LO(nn.Module):
             for _ in range(num_decoder_layers)
         ])
 
-        # Token prediction head
+        # Token prediction head (p-side)
         self.W_out = nn.Linear(hidden_dim, num_letters, bias=True)
 
-        # Order-policy heads
-        self.W_order_p = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
-        self.W_order_q = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        # Token prediction head (q-side); separate so that q-path gradients
+        # do not interfere with the NLL-trained p-side W_out.
+        self.W_out_q = nn.Linear(hidden_dim, num_letters, bias=True)
+
+        # Order-policy heads take the (21-dim) classifier logits as input
+        # rather than h_V directly.  The NLL loss on W_out keeps logit scale
+        # bounded, which prevents FP16 overflow in logcumsumexp.
+        self.W_order_p = nn.Linear(num_letters, 1)
+        self.W_order_q = nn.Linear(num_letters, 1)
 
         # ---- Optional separate q_theta decoder ----
         if self.separate_q_decoder:
@@ -200,11 +199,7 @@ class ProteinMPNN_LO(nn.Module):
                 DecLayer(hidden_dim, hidden_dim * 3, dropout=dropout)
                 for _ in range(num_decoder_layers)
             ])
-            self.W_order_q_sep = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1),
-            )
+            self.W_order_q_sep = nn.Linear(num_letters, 1)
 
         # ---- Parameter initialization ----
         for p in self.parameters():
@@ -364,9 +359,10 @@ class ProteinMPNN_LO(nn.Module):
             h_ESV = cat_neighbors_nodes(h_V, h_ES, E_idx)
             h_V = dec_layer(h_V, h_ESV, mask_V=mask, mask_attend=mask_attend)
 
-        # Cast to float32 before the order head to prevent FP16 overflow
-        # (logcumsumexp(inf) - inf = NaN under autocast).
-        q_logits = order_head(h_V.float()).squeeze(-1)
+        # Derive order logits from W_out_q classifier logits (shared-torso).
+        # float32 cast prevents FP16 overflow in downstream logcumsumexp.
+        q_logits_input = self.W_out_q(h_V)   # [B, L, num_letters]
+        q_logits = order_head(q_logits_input.float()).squeeze(-1)
         q_logits = q_logits.masked_fill(design_mask == 0, float('-inf'))
         return q_logits
 
@@ -429,9 +425,10 @@ class ProteinMPNN_LO(nn.Module):
         logits = self.W_out(h_V)
         log_probs = F.log_softmax(logits, dim=-1)
 
-        # Cast to float32 before the order head to prevent FP16 overflow
-        # (logcumsumexp(inf) - inf = NaN under autocast).
-        p_order_logits = self.W_order_p(h_V.float()).squeeze(-1)
+        # Derive order logits from the classifier logits (shared-torso).
+        # detach() prevents order-head gradients from flowing back into W_out;
+        # W_out is already trained by the NLL loss which naturally bounds logit scale.
+        p_order_logits = self.W_order_p(logits.detach().float()).squeeze(-1)
         p_order_logits = p_order_logits.masked_fill(design_mask == 0, float('-inf'))
 
         return log_probs, p_order_logits
