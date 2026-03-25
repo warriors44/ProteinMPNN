@@ -431,13 +431,12 @@ def main(args: argparse.Namespace) -> None:
                             continue
                         if not torch.isfinite(p.grad).all():
                             grad_nonfinite_count += 1
+                    grad_norm_value_cur: float | None = None
                     if args.gradient_norm > 0.0:
                         total_norm = torch.nn.utils.clip_grad_norm_(
                             model.parameters(), args.gradient_norm,
                         )
-                        grad_norm_value = float(total_norm.detach().cpu().item())
-                        grad_norm_sum += grad_norm_value
-                        grad_norm_w += 1.0
+                        grad_norm_value_cur = float(total_norm.detach().cpu().item())
                     scaler.step(optimizer)
                     scaler.update()
                     scaler_scale_after = float(scaler.get_scale())
@@ -455,16 +454,88 @@ def main(args: argparse.Namespace) -> None:
                             continue
                         if not torch.isfinite(p.grad).all():
                             grad_nonfinite_count += 1
+                    grad_norm_value_cur = None
                     if args.gradient_norm > 0.0:
                         total_norm = torch.nn.utils.clip_grad_norm_(
                             model.parameters(), args.gradient_norm,
                         )
-                        grad_norm_value = float(total_norm.detach().cpu().item())
-                        grad_norm_sum += grad_norm_value
-                        grad_norm_w += 1.0
+                        grad_norm_value_cur = float(total_norm.detach().cpu().item())
                     optimizer.step()
                     scaler_scale_after = float("nan")
                     step_skipped = 0
+
+                # Mask non-finite steps out of all epoch-level statistics updates
+                # (skip_both: don't add to numerator nor denominator).
+                # Pull debug stats from info (present when return_debug=True).
+                # We compute them once and reuse the same scalars for:
+                #   1) valid_step (aggregation mask)
+                #   2) nonfinite_logfile / FIRST_EVENT logging.
+                loss_isfinite = float(
+                    info.get("dbg_loss_isfinite", torch.tensor(0.0))
+                    .detach().cpu().item(),
+                )
+                design_sum_min = float(
+                    info.get("dbg_design_sum_min", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                design_sum_max = float(
+                    info.get("dbg_design_sum_max", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                design_zero_count = float(
+                    info.get("dbg_design_zero_count", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                remaining_sum_min = float(
+                    info.get("dbg_remaining_sum_min", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                remaining_sum_max = float(
+                    info.get("dbg_remaining_sum_max", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                remaining_zero_count = float(
+                    info.get("dbg_remaining_zero_count", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                all_neg_inf_rows_count = float(
+                    info.get("dbg_all_neg_inf_rows_count", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                any_nonfinite_F = float(
+                    info.get("dbg_any_nonfinite_F", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                any_nonfinite_log_q = float(
+                    info.get("dbg_any_nonfinite_log_q", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                any_nonfinite_q_logits = float(
+                    info.get("dbg_any_nonfinite_q_logits", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                any_nonfinite_log_probs = float(
+                    info.get("dbg_any_nonfinite_log_probs", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                any_nonfinite_p_order_logits = float(
+                    info.get("dbg_any_nonfinite_p_order_logits", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+
+                nonfinite_trigger_mask = (
+                    (loss_isfinite == 0.0)
+                    or (grad_nonfinite_count > 0)
+                    or (design_zero_count > 0)
+                    or (remaining_zero_count > 0)
+                    or (any_nonfinite_F > 0)
+                    or (any_nonfinite_log_q > 0)
+                    or (any_nonfinite_q_logits > 0)
+                    or (any_nonfinite_log_probs > 0)
+                    or (any_nonfinite_p_order_logits > 0)
+                    or (step_skipped > 0)
+                )
+                valid_step = not nonfinite_trigger_mask
 
                 # Diagnostic NLL metrics (no grad)
                 with torch.no_grad():
@@ -474,40 +545,31 @@ def main(args: argparse.Namespace) -> None:
                     weight = float(
                         (mask * chain_M).sum().detach().cpu().item(),
                     )
-                    train_elbo_sum += float(loss_elbo.detach().cpu().item()) * weight
-                    train_elbo_w += weight
-                    train_nll_sum += nll * weight
-                    train_acc_sum += acc * weight
-                    train_w += weight
+                    if valid_step:
+                        train_elbo_sum += float(loss_elbo.detach().cpu().item()) * weight
+                        train_elbo_w += weight
+                        train_nll_sum += nll * weight
+                        train_acc_sum += acc * weight
+                        train_w += weight
 
-                    if "i_mean" in info:
-                        i_mean_sum += float(
-                            info["i_mean"].detach().cpu().item(),
-                        )
-                        info_w += 1.0
-                    if "delta_F_abs" in info:
-                        delta_f_sum += float(
-                            info["delta_F_abs"].detach().cpu().item(),
-                        )
+                        if "i_mean" in info:
+                            i_mean_sum += float(
+                                info["i_mean"].detach().cpu().item(),
+                            )
+                            info_w += 1.0
+                        if "delta_F_abs" in info:
+                            delta_f_sum += float(
+                                info["delta_F_abs"].detach().cpu().item(),
+                            )
+
+                        if grad_norm_value_cur is not None and np.isfinite(grad_norm_value_cur):
+                            grad_norm_sum += grad_norm_value_cur
+                            grad_norm_w += 1.0
 
                 total_step += 1
 
                 # Nonfinite debug statistics log (event-based but lightweight enough to write each step).
                 dt_cur = float(time.time() - t0)
-                # Pull debug stats from info (present when return_debug=True).
-                loss_isfinite = float(info.get("dbg_loss_isfinite", torch.tensor(0.0)).detach().cpu().item())
-                design_sum_min = float(info.get("dbg_design_sum_min", torch.tensor(float("nan"))).detach().cpu().item())
-                design_sum_max = float(info.get("dbg_design_sum_max", torch.tensor(float("nan"))).detach().cpu().item())
-                design_zero_count = float(info.get("dbg_design_zero_count", torch.tensor(float("nan"))).detach().cpu().item())
-                remaining_sum_min = float(info.get("dbg_remaining_sum_min", torch.tensor(float("nan"))).detach().cpu().item())
-                remaining_sum_max = float(info.get("dbg_remaining_sum_max", torch.tensor(float("nan"))).detach().cpu().item())
-                remaining_zero_count = float(info.get("dbg_remaining_zero_count", torch.tensor(float("nan"))).detach().cpu().item())
-                all_neg_inf_rows_count = float(info.get("dbg_all_neg_inf_rows_count", torch.tensor(float("nan"))).detach().cpu().item())
-                any_nonfinite_F = float(info.get("dbg_any_nonfinite_F", torch.tensor(float("nan"))).detach().cpu().item())
-                any_nonfinite_log_q = float(info.get("dbg_any_nonfinite_log_q", torch.tensor(float("nan"))).detach().cpu().item())
-                any_nonfinite_q_logits = float(info.get("dbg_any_nonfinite_q_logits", torch.tensor(float("nan"))).detach().cpu().item())
-                any_nonfinite_log_probs = float(info.get("dbg_any_nonfinite_log_probs", torch.tensor(float("nan"))).detach().cpu().item())
-                any_nonfinite_p_order_logits = float(info.get("dbg_any_nonfinite_p_order_logits", torch.tensor(float("nan"))).detach().cpu().item())
 
                 with open(nonfinite_logfile, "a") as nf:
                     nf.write(
@@ -521,19 +583,7 @@ def main(args: argparse.Namespace) -> None:
                     )
 
                 # One-time detailed dump on first sign of nonfinite behavior.
-                nonfinite_trigger = (
-                    (loss_isfinite == 0.0)
-                    or (grad_nonfinite_count > 0)
-                    or (design_zero_count > 0)
-                    or (remaining_zero_count > 0)
-                    or (any_nonfinite_F > 0)
-                    or (any_nonfinite_log_q > 0)
-                    or (any_nonfinite_q_logits > 0)
-                    or (any_nonfinite_log_probs > 0)
-                    or (any_nonfinite_p_order_logits > 0)
-                    or (step_skipped > 0)
-                )
-                if (not first_nonfinite_dumped) and nonfinite_trigger:
+                if (not first_nonfinite_dumped) and nonfinite_trigger_mask:
                     first_nonfinite_dumped = True
                     with open(nonfinite_logfile, "a") as nf:
                         nf.write(
