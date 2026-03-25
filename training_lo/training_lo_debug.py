@@ -27,7 +27,7 @@ def main(args: argparse.Namespace) -> None:
 
     import numpy as np
     import torch
-    from torch.cuda.amp import GradScaler, autocast
+    from torch.amp import GradScaler, autocast
 
     # ------------------------------------------------------------------
     # Import training utilities from the existing `training/` directory.
@@ -181,7 +181,7 @@ def main(args: argparse.Namespace) -> None:
     random.seed(seed)
     np.random.seed(seed)
 
-    scaler = GradScaler(enabled=bool(args.mixed_precision and torch.cuda.is_available()))
+    scaler = GradScaler("cuda",enabled=bool(args.mixed_precision and torch.cuda.is_available()))
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # ------------------------------------------------------------------
@@ -417,7 +417,7 @@ def main(args: argparse.Namespace) -> None:
                 optimizer.zero_grad()
                 if scaler.is_enabled():
                     scaler_scale_before = float(scaler.get_scale())
-                    with autocast():
+                    with autocast("cuda"):
                         loss_elbo, info = model.compute_elbo(
                             X, S, mask, chain_M, residue_idx, chain_encoding_all,
                             return_debug=True,
