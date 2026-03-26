@@ -199,6 +199,7 @@ def main(args: argparse.Namespace) -> None:
             f.write(
                 "epoch\tstep\ttime_s\t"
                 "train_elbo_loss\ttrain_nll\ttrain_ppl\ttrain_acc\t"
+                "train_entropy_q\ttrain_entropy_q_weighted\ttrain_elbo_raw\t"
                 "valid_elbo_loss\tvalid_nll_proxy\tvalid_ppl_proxy\tvalid_acc\t"
                 "valid_nll_isq\tvalid_ppl_isq\t"
                 "i_mean\tdelta_F_abs\tgrad_norm\n"
@@ -211,6 +212,7 @@ def main(args: argparse.Namespace) -> None:
             f.write(
                 "epoch\tstep\ttime_s\t"
                 "train_elbo_loss\ttrain_nll\ttrain_ppl\ttrain_acc\t"
+                "train_entropy_q\ttrain_entropy_q_weighted\ttrain_elbo_raw\t"
                 "valid_elbo_loss\tvalid_nll_proxy\tvalid_ppl_proxy\tvalid_acc\t"
                 "valid_nll_isq\tvalid_ppl_isq\t"
                 "i_mean\tdelta_F_abs\tgrad_norm\n"
@@ -368,6 +370,10 @@ def main(args: argparse.Namespace) -> None:
             info_w = 0.0
             grad_norm_sum = 0.0
             grad_norm_w = 0.0
+            entropy_q_sum = 0.0
+            entropy_q_weighted_sum = 0.0
+            elbo_raw_sum = 0.0
+            entropy_q_w = 0.0
 
             if epoch_idx % args.reload_data_every_n_epochs == 0:
                 if reload_c != 0:
@@ -421,6 +427,7 @@ def main(args: argparse.Namespace) -> None:
                         loss_elbo, info = model.compute_elbo(
                             X, S, mask, chain_M, residue_idx, chain_encoding_all,
                             return_debug=True,
+                            lambda_entropy=args.lambda_entropy,
                         )
                     scaler.scale(loss_elbo).backward()
                     scaler.unscale_(optimizer)
@@ -446,6 +453,7 @@ def main(args: argparse.Namespace) -> None:
                     loss_elbo, info = model.compute_elbo(
                         X, S, mask, chain_M, residue_idx, chain_encoding_all,
                         return_debug=True,
+                        lambda_entropy=args.lambda_entropy,
                     )
                     loss_elbo.backward()
                     grad_nonfinite_count = 0
@@ -566,6 +574,12 @@ def main(args: argparse.Namespace) -> None:
                             grad_norm_sum += grad_norm_value_cur
                             grad_norm_w += 1.0
 
+                        if "entropy_q" in info:
+                            entropy_q_sum += float(info["entropy_q"].detach().cpu().item()) * weight
+                            entropy_q_weighted_sum += float(info["entropy_q_weighted"].detach().cpu().item()) * weight
+                            elbo_raw_sum += float(info["elbo_no_penalty"].detach().cpu().item()) * weight
+                            entropy_q_w += weight
+
                 total_step += 1
 
                 # Nonfinite debug statistics log (event-based but lightweight enough to write each step).
@@ -607,11 +621,15 @@ def main(args: argparse.Namespace) -> None:
                     i_mean_cur = i_mean_sum / max(info_w, 1e-8)
                     delta_f_cur = delta_f_sum / max(info_w, 1e-8)
                     grad_norm_avg_cur = grad_norm_sum / max(grad_norm_w, 1.0)
+                    entropy_q_cur = entropy_q_sum / max(entropy_q_w, 1e-8)
+                    entropy_q_weighted_cur = entropy_q_weighted_sum / max(entropy_q_w, 1e-8)
+                    elbo_raw_cur = elbo_raw_sum / max(entropy_q_w, 1e-8)
 
                     with open(debug_logfile, "a") as df:
                         df.write(
                             f"{epoch_idx + 1}\t{total_step}\t{dt_cur:.1f}\t"
                             f"{train_elbo_cur:.6f}\t{train_nll_cur:.6f}\t{train_ppl_cur:.3f}\t{train_acc_cur:.4f}\t"
+                            f"{entropy_q_cur:.6f}\t{entropy_q_weighted_cur:.6f}\t{elbo_raw_cur:.6f}\t"
                             f"nan\tnan\tnan\tnan\tnan\tnan\t"
                             f"{i_mean_cur:.3f}\t{delta_f_cur:.6f}\t{grad_norm_avg_cur:.6f}\n"
                         )
@@ -633,6 +651,7 @@ def main(args: argparse.Namespace) -> None:
                     X, S, mask, lengths, chain_M, residue_idx, _mask_self, chain_encoding_all = featurize(batch, device)
                     loss_elbo, _info = model.compute_elbo(
                         X, S, mask, chain_M, residue_idx, chain_encoding_all,
+                        lambda_entropy=args.lambda_entropy,
                     )
                     # Always compute accuracy from a forward pass (diagnostic).
                     nll_diag, _ppl_diag, acc = _compute_nll_metrics(
@@ -681,6 +700,9 @@ def main(args: argparse.Namespace) -> None:
             train_nll = train_nll_sum / max(train_w, 1e-8)
             train_ppl = float(np.exp(train_nll))
             train_acc = train_acc_sum / max(train_w, 1e-8)
+            train_entropy_q = entropy_q_sum / max(entropy_q_w, 1e-8)
+            train_entropy_q_weighted = entropy_q_weighted_sum / max(entropy_q_w, 1e-8)
+            train_elbo_raw = elbo_raw_sum / max(entropy_q_w, 1e-8)
 
             valid_elbo = valid_elbo_sum / max(valid_elbo_w, 1e-8)
             valid_nll_proxy = valid_nll_proxy_sum / max(valid_w, 1e-8)
@@ -705,6 +727,7 @@ def main(args: argparse.Namespace) -> None:
                 f.write(
                     f"{epoch_idx + 1}\t{total_step}\t{dt:.1f}\t"
                     f"{train_elbo:.6f}\t{train_nll:.6f}\t{train_ppl:.3f}\t{train_acc:.4f}\t"
+                    f"{train_entropy_q:.6f}\t{train_entropy_q_weighted:.6f}\t{train_elbo_raw:.6f}\t"
                     f"{valid_elbo:.6f}\t{valid_nll_proxy:.6f}\t{valid_ppl_proxy:.3f}\t{valid_acc:.4f}\t"
                     f"{valid_nll_isq:.6f}\t{valid_ppl_isq:.3f}\t"
                     f"{i_mean:.3f}\t{delta_f:.6f}\t{grad_norm_avg:.6f}\n"
@@ -817,6 +840,11 @@ if __name__ == "__main__":
 
     # LO-ARM specific
     argparser.add_argument("--num_lo_samples", type=int, default=2, help="Number of RLOO samples K (>=2).")
+    argparser.add_argument(
+        "--lambda_entropy", type=float, default=0.0,
+        help="Entropy bonus coefficient for q order distribution (0 = disabled). "
+             "loss = loss_elbo - lambda_entropy * H_normalized.",
+    )
     argparser.add_argument("--separate_q_decoder", type=int, default=0, help="0/1: use a separate q decoder.")
     argparser.add_argument("--ca_only", type=int, default=0, help="0/1: CA-only features/model.")
     argparser.add_argument("--seed", type=int, default=0, help="If 0, a random seed is picked.")

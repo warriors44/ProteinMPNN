@@ -514,6 +514,7 @@ class ProteinMPNN_LO(nn.Module):
         chain_encoding_all: torch.Tensor,
         *,
         return_debug: bool = False,
+        lambda_entropy: float = 0.0,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """ELBO loss following Algorithm 1 of Wang et al. (arXiv:2503.05979).
 
@@ -526,9 +527,12 @@ class ProteinMPNN_LO(nn.Module):
             chain_encoding_all: chain encoding [B, L].
             return_debug: If True, include extra debug statistics in the
                 returned info dict to help diagnose NaN/inf issues.
+            lambda_entropy: Coefficient for the entropy bonus on q.
+                loss_final = loss_elbo - lambda_entropy * H_normalized,
+                where H_normalized = H(q | remaining) / log(R_t) in [0, 1].
 
         Returns:
-            loss: scalar loss to minimise.
+            loss: scalar loss to minimise (penalized by entropy bonus if lambda_entropy > 0).
             info: monitoring dict.
         """
         B, N = S.shape
@@ -551,6 +555,7 @@ class ProteinMPNN_LO(nn.Module):
 
         F_values: List[torch.Tensor] = []
         log_q_values: List[torch.Tensor] = []
+        entropy_values: List[torch.Tensor] = []
 
         K = self.num_samples
         step_indices = torch.arange(N, device=device).unsqueeze(0)
@@ -608,6 +613,18 @@ class ProteinMPNN_LO(nn.Module):
             )
             F_values.append(F_k)
 
+            # Entropy of q over remaining positions, normalized by log(R_t) for
+            # length-invariance.  torch.distributions.Categorical internally
+            # clamps -inf logits so that 0*log(0) is treated as 0 (no NaN).
+            q_logits_for_ent = q_logits.float().masked_fill(
+                remaining_mask == 0, float('-inf'),
+            )
+            H_k = torch.distributions.Categorical(
+                logits=q_logits_for_ent,
+            ).entropy()  # [B]
+            R_t = remaining_mask.sum(dim=-1).clamp(min=2.0)  # avoid log(0)/log(1)
+            entropy_values.append(H_k / torch.log(R_t))      # [B], approx in [0, 1]
+
             if return_debug:
                 dbg_any_nonfinite_F = torch.maximum(
                     dbg_any_nonfinite_F,
@@ -651,7 +668,13 @@ class ProteinMPNN_LO(nn.Module):
         rloo_term = (adv * log_q_stack).mean(dim=0)  # [B]
 
         loss_per_elem = -L_design * (F_mean + rloo_term)
-        loss = loss_per_elem.sum() / L_design.sum()
+        loss_raw = loss_per_elem.sum() / L_design.sum()
+
+        # Entropy bonus: H_normalized averaged over K samples and batch elements.
+        H_stack = torch.stack(entropy_values, dim=0)   # [K, B]
+        H_normalized = H_stack.mean()                  # scalar
+        entropy_penalty = lambda_entropy * H_normalized  # >= 0
+        loss = loss_raw - entropy_penalty               # maximize H → subtract from loss
 
         with torch.no_grad():
             elbo_per_res = F_mean.mean()
@@ -672,6 +695,9 @@ class ProteinMPNN_LO(nn.Module):
             'F_mean': F_mean.mean(),
             'delta_F_abs': delta_F_abs,
             'i_mean': i_design.float().mean(),
+            'entropy_q': H_normalized.detach(),
+            'entropy_q_weighted': entropy_penalty.detach(),
+            'elbo_no_penalty': loss_raw.detach(),
         }
 
         if return_debug:
