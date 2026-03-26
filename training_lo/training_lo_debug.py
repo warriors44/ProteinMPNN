@@ -11,6 +11,11 @@ def main(args: argparse.Namespace) -> None:
     - step-level grad norms to the main epoch log (same columns)
     - an optional debug log file that records the same columns as `log.txt`
       every N steps (controlled by --debug_log_interval).
+    - On the first step where any of dbg_any_nonfinite_log_q, dbg_any_nonfinite_q_logits,
+      dbg_any_nonfinite_log_probs, or dbg_any_nonfinite_p_order_logits is set, writes
+      FIRST_EVENT and saves weights, RNG state (before and after ``compute_elbo``),
+      args, and the current batch under ``first_critical_event_epoch{E}_step{S}*``
+      in the run folder, then stops training (exits the epoch loop after that batch).
     """
 
     import copy
@@ -232,7 +237,8 @@ def main(args: argparse.Namespace) -> None:
     if not args.previous_checkpoint:
         with open(nonfinite_logfile, "w") as f:
             f.write(nonfinite_header)
-    first_nonfinite_dumped = False
+    # FIRST_EVENT + weight/batch snapshot only for the four tensor flags above.
+    first_critical_event_dumped = False
 
     # ------------------------------------------------------------------
     # Data pipeline (same as training/training.py)
@@ -313,6 +319,122 @@ def main(args: argparse.Namespace) -> None:
     if args.previous_checkpoint:
         optimizer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
+    def _dbg_float(info: Dict[str, Any], key: str, default: float = 0.0) -> float:
+        t = info.get(key, torch.tensor(default, device=device))
+        if not torch.is_tensor(t):
+            return float(default)
+        return float(t.detach().cpu().item())
+
+    def _critical_tensor_nonfinite_from_info(info: Dict[str, Any]) -> bool:
+        """True if any of the four tensor-level dbg non-finite flags is set."""
+        return (
+            _dbg_float(info, "dbg_any_nonfinite_log_q") > 0
+            or _dbg_float(info, "dbg_any_nonfinite_q_logits") > 0
+            or _dbg_float(info, "dbg_any_nonfinite_log_probs") > 0
+            or _dbg_float(info, "dbg_any_nonfinite_p_order_logits") > 0
+        )
+
+    def _capture_rng_state_before_compute_elbo() -> Dict[str, Any]:
+        """Snapshot RNG immediately before ``compute_elbo`` for bit-level replay of its draws."""
+        snap: Dict[str, Any] = {
+            "torch_rng_state_before_compute_elbo": torch.get_rng_state(),
+            "numpy_rng_state_before_compute_elbo": np.random.get_state(),
+            "python_random_state_before_compute_elbo": random.getstate(),
+        }
+        if torch.cuda.is_available():
+            snap["cuda_rng_state_all_before_compute_elbo"] = torch.cuda.get_rng_state_all()
+        return snap
+
+    def _save_first_critical_event_snapshot(
+        *,
+        step_id: int,
+        epoch_num: int,
+        info: Dict[str, Any],
+        rng_before_compute_elbo: Dict[str, Any],
+    ) -> None:
+        """Save weights (pre-backward), batch, RNG, and args; append FIRST_EVENT line.
+
+        ``rng_before_compute_elbo`` must be captured immediately before ``compute_elbo`` so that
+        ``replay_critical_debug`` can restore RNG and replay ``compute_elbo`` internal randomness
+        (e.g. ``i_design``, Gumbel order).  Additional keys ``torch_rng_state`` / ``numpy_rng_state``
+        / ... are taken at save time (after ``compute_elbo``, before ``backward``).
+        """
+        stem = f"first_critical_event_epoch{epoch_num}_step{step_id}"
+        ckpt_path = base_folder + f"model_weights/{stem}.pt"
+        batch_path = base_folder + f"{stem}_batch.pt"
+        meta_path = base_folder + f"{stem}_meta.json"
+
+        critical_flags = {
+            "any_nonfinite_log_q": _dbg_float(info, "dbg_any_nonfinite_log_q") > 0,
+            "any_nonfinite_q_logits": _dbg_float(info, "dbg_any_nonfinite_q_logits") > 0,
+            "any_nonfinite_log_probs": _dbg_float(info, "dbg_any_nonfinite_log_probs") > 0,
+            "any_nonfinite_p_order_logits": _dbg_float(
+                info, "dbg_any_nonfinite_p_order_logits",
+            ) > 0,
+        }
+
+        ckpt_payload: Dict[str, Any] = {
+            "epoch": epoch_num,
+            "step": step_id,
+            "num_edges": args.num_neighbors,
+            "noise_level": args.backbone_noise,
+            "num_samples": args.num_lo_samples,
+            "separate_q_decoder": bool(args.separate_q_decoder),
+            "lambda_entropy": float(args.lambda_entropy),
+            "model_state_dict": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+            "optimizer_state_dict": copy.deepcopy(optimizer.optimizer.state_dict()),
+            "weights_match_forward_before_backward": True,
+            "first_critical_tensor_nonfinite": True,
+            "critical_tensor_flags": critical_flags,
+            "seed": int(seed),
+        }
+        ckpt_payload.update(rng_before_compute_elbo)
+        # After compute_elbo, before backward (legacy + debugging backward RNG).
+        ckpt_payload["torch_rng_state"] = torch.get_rng_state()
+        ckpt_payload["numpy_rng_state"] = np.random.get_state()
+        ckpt_payload["python_random_state"] = random.getstate()
+        if torch.cuda.is_available():
+            ckpt_payload["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+        torch.save(ckpt_payload, ckpt_path)
+
+        torch.save(
+            {
+                "X": X.detach().cpu(),
+                "S": S.detach().cpu(),
+                "mask": mask.detach().cpu(),
+                "chain_M": chain_M.detach().cpu(),
+                "residue_idx": residue_idx.detach().cpu(),
+                "chain_encoding_all": chain_encoding_all.detach().cpu(),
+            },
+            batch_path,
+        )
+
+        meta_payload = {
+            "epoch": epoch_num,
+            "step": step_id,
+            "seed": int(seed),
+            "critical_tensor_flags": critical_flags,
+            "args": vars(args),
+            "weights_match_forward_before_backward": True,
+            "has_rng_before_compute_elbo": True,
+        }
+        with open(meta_path, "w") as f:
+            json.dump(meta_payload, f, indent=2, default=str)
+
+        with open(nonfinite_logfile, "a") as nf:
+            nf.write(
+                "FIRST_EVENT\t"
+                f"epoch={epoch_num}\tstep={step_id}\t"
+                f"saved_ckpt=model_weights/{stem}.pt\t"
+                f"saved_batch={stem}_batch.pt\t"
+                f"saved_meta={stem}_meta.json\t"
+                f"any_nonfinite_log_q={int(critical_flags['any_nonfinite_log_q'])}\t"
+                f"any_nonfinite_q_logits={int(critical_flags['any_nonfinite_q_logits'])}\t"
+                f"any_nonfinite_log_probs={int(critical_flags['any_nonfinite_log_probs'])}\t"
+                f"any_nonfinite_p_order_logits="
+                f"{int(critical_flags['any_nonfinite_p_order_logits'])}\n"
+            )
+
     # ------------------------------------------------------------------
     # Training loop with background data prefetching (same pattern)
     # ------------------------------------------------------------------
@@ -355,6 +477,7 @@ def main(args: argparse.Namespace) -> None:
 
         reload_c = 0
         best_valid_ppl_proxy = float("inf")
+        stop_training: bool = False
         for e0 in range(args.num_epochs):
             t0 = time.time()
             epoch_idx = start_epoch + e0
@@ -421,6 +544,7 @@ def main(args: argparse.Namespace) -> None:
                 X, S, mask, lengths, chain_M, residue_idx, _mask_self, chain_encoding_all = featurize(batch, device)
 
                 optimizer.zero_grad()
+                rng_before_compute_elbo = _capture_rng_state_before_compute_elbo()
                 if scaler.is_enabled():
                     scaler_scale_before = float(scaler.get_scale())
                     with autocast("cuda"):
@@ -429,6 +553,26 @@ def main(args: argparse.Namespace) -> None:
                             return_debug=True,
                             lambda_entropy=args.lambda_entropy,
                         )
+                else:
+                    scaler_scale_before = float("nan")
+                    loss_elbo, info = model.compute_elbo(
+                        X, S, mask, chain_M, residue_idx, chain_encoding_all,
+                        return_debug=True,
+                        lambda_entropy=args.lambda_entropy,
+                    )
+
+                # Weights in model match the forward that produced ``info``; save before backward.
+                if (not first_critical_event_dumped) and _critical_tensor_nonfinite_from_info(info):
+                    _save_first_critical_event_snapshot(
+                        step_id=total_step + 1,
+                        epoch_num=epoch_idx + 1,
+                        info=info,
+                        rng_before_compute_elbo=rng_before_compute_elbo,
+                    )
+                    first_critical_event_dumped = True
+                    stop_training = True
+
+                if scaler.is_enabled():
                     scaler.scale(loss_elbo).backward()
                     scaler.unscale_(optimizer)
                     # Detect nonfinite gradients after unscale (indicates backward overflow or NaN propagation).
@@ -449,12 +593,6 @@ def main(args: argparse.Namespace) -> None:
                     scaler_scale_after = float(scaler.get_scale())
                     step_skipped = int(scaler_scale_after < scaler_scale_before)
                 else:
-                    scaler_scale_before = float("nan")
-                    loss_elbo, info = model.compute_elbo(
-                        X, S, mask, chain_M, residue_idx, chain_encoding_all,
-                        return_debug=True,
-                        lambda_entropy=args.lambda_entropy,
-                    )
                     loss_elbo.backward()
                     grad_nonfinite_count = 0
                     for p in model.parameters():
@@ -596,22 +734,6 @@ def main(args: argparse.Namespace) -> None:
                         f"{any_nonfinite_F:.0f}\t{any_nonfinite_log_q:.0f}\t{any_nonfinite_q_logits:.0f}\t{any_nonfinite_log_probs:.0f}\t{any_nonfinite_p_order_logits:.0f}\n"
                     )
 
-                # One-time detailed dump on first sign of nonfinite behavior.
-                if (not first_nonfinite_dumped) and nonfinite_trigger_mask:
-                    first_nonfinite_dumped = True
-                    with open(nonfinite_logfile, "a") as nf:
-                        nf.write(
-                            "FIRST_EVENT\t"
-                            f"epoch={epoch_idx + 1}\tstep={total_step}\t"
-                            f"loss_isfinite={loss_isfinite:.0f}\t"
-                            f"grad_nonfinite_count={grad_nonfinite_count}\t"
-                            f"design_zero_count={design_zero_count:.0f}\t"
-                            f"remaining_zero_count={remaining_zero_count:.0f}\t"
-                            f"all_neg_inf_rows_count={all_neg_inf_rows_count:.0f}\t"
-                            f"any_nonfinite_q_logits={any_nonfinite_q_logits:.0f}\t"
-                            f"step_skipped={step_skipped}\n"
-                        )
-
                 # Optional step-level debug log (training side only; val fields set to nan).
                 if args.debug_log_interval > 0 and (total_step % args.debug_log_interval == 0):
                     train_elbo_cur = train_elbo_sum / max(train_elbo_w, 1e-8)
@@ -633,6 +755,12 @@ def main(args: argparse.Namespace) -> None:
                             f"nan\tnan\tnan\tnan\tnan\tnan\t"
                             f"{i_mean_cur:.3f}\t{delta_f_cur:.6f}\t{grad_norm_avg_cur:.6f}\n"
                         )
+
+                if stop_training:
+                    break
+
+            if stop_training:
+                break
 
             # Validation: always proxy; full IS-q every interval (and epoch 1)
             epoch_num = epoch_idx + 1
@@ -788,6 +916,15 @@ def main(args: argparse.Namespace) -> None:
                     },
                     ckpt_path,
                 )
+
+        if stop_training:
+            stop_msg = (
+                f"Stopped training after first critical tensor non-finite event "
+                f"(epoch={epoch_idx + 1}, step={total_step})."
+            )
+            print(stop_msg)
+            with open(nonfinite_logfile, "a") as nf:
+                nf.write(f"STOPPED_AFTER_FIRST_CRITICAL_EVENT\t{stop_msg}\n")
 
 
 if __name__ == "__main__":
