@@ -124,14 +124,29 @@ def _torch_cpu_rng_state(state: Any) -> torch.Tensor:
     return state.detach().cpu()
 
 
+def _cuda_rng_byte_tensor(t: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """CUDA ``set_rng_state`` requires a ``ByteTensor`` on the target CUDA device.
+
+    ``torch.load(..., map_location=...)`` can leave RNG state tensors on the wrong
+    device or dtype; normalize before ``torch.cuda.set_rng_state_all``.
+    """
+    out = t.detach()
+    if out.dtype != torch.uint8:
+        out = out.to(dtype=torch.uint8)
+    return out.to(device=device)
+
+
 def _cuda_rng_states_on_device(states: Any, device: torch.device) -> Any:
-    """Place CUDA RNG state tensors on ``device`` (e.g. after ``map_location=cpu``)."""
+    """Place CUDA RNG state tensors on ``device`` as ``uint8`` (ByteTensor)."""
     if device.type != "cuda":
         return states
     if isinstance(states, (list, tuple)):
-        return [s.to(device) if torch.is_tensor(s) else s for s in states]
+        return [
+            _cuda_rng_byte_tensor(s, device) if torch.is_tensor(s) else s
+            for s in states
+        ]
     if torch.is_tensor(states):
-        return states.to(device)
+        return _cuda_rng_byte_tensor(states, device)
     return states
 
 
