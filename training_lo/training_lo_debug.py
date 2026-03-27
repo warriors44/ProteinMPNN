@@ -547,7 +547,7 @@ def main(args: argparse.Namespace) -> None:
                 rng_before_compute_elbo = _capture_rng_state_before_compute_elbo()
                 if scaler.is_enabled():
                     scaler_scale_before = float(scaler.get_scale())
-                    with autocast("cuda"):
+                    with autocast("cuda", dtype=torch.bfloat16):
                         loss_elbo, info = model.compute_elbo(
                             X, S, mask, chain_M, residue_idx, chain_encoding_all,
                             return_debug=True,

@@ -454,7 +454,7 @@ def main() -> None:
             handles, first_hit = register_nan_hooks(model, verbose=args.verbose_hooks)
         try:
             if args.mixed_precision and device.type == "cuda":
-                with autocast("cuda"):
+                with autocast("cuda", dtype=torch.bfloat16):
                     loss, info = run_elbo_inner()
             else:
                 loss, info = run_elbo_inner()
