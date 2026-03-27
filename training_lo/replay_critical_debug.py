@@ -113,22 +113,56 @@ def load_batch(batch_path: Path, device: torch.device) -> Dict[str, torch.Tensor
     return {k: v.to(device) for k, v in raw.items()}
 
 
-def restore_rng_from_checkpoint(ckpt: Dict[str, Any]) -> None:
+def _torch_cpu_rng_state(state: Any) -> torch.Tensor:
+    """Return CPU tensor RNG state for ``torch.set_rng_state``.
+
+    Checkpoints loaded with ``map_location=cuda`` move all tensors to GPU, but
+    ``set_rng_state`` only accepts a CPU ``ByteTensor``.
+    """
+    if not torch.is_tensor(state):
+        raise TypeError(f"Expected Tensor for torch RNG state, got {type(state)}")
+    return state.detach().cpu()
+
+
+def _cuda_rng_states_on_device(states: Any, device: torch.device) -> Any:
+    """Place CUDA RNG state tensors on ``device`` (e.g. after ``map_location=cpu``)."""
+    if device.type != "cuda":
+        return states
+    if isinstance(states, (list, tuple)):
+        return [s.to(device) if torch.is_tensor(s) else s for s in states]
+    if torch.is_tensor(states):
+        return states.to(device)
+    return states
+
+
+def restore_rng_from_checkpoint(ckpt: Dict[str, Any], *, device: torch.device) -> None:
     """Restore Python / NumPy / Torch (and CUDA) RNG state if present.
 
     Prefer ``*_before_compute_elbo`` keys (replay ``compute_elbo`` draws) over legacy
     post-``compute_elbo`` keys.
+
+    Args:
+        ckpt: Loaded checkpoint dict (may have tensors on GPU from ``map_location``).
+        device: Replay device; CUDA RNG is restored only when ``device.type == "cuda"``.
     """
     import random
 
     if "torch_rng_state_before_compute_elbo" in ckpt:
-        torch.set_rng_state(ckpt["torch_rng_state_before_compute_elbo"])
+        torch.set_rng_state(_torch_cpu_rng_state(ckpt["torch_rng_state_before_compute_elbo"]))
         if "numpy_rng_state_before_compute_elbo" in ckpt:
             np.random.set_state(ckpt["numpy_rng_state_before_compute_elbo"])
         if "python_random_state_before_compute_elbo" in ckpt:
             random.setstate(ckpt["python_random_state_before_compute_elbo"])
-        if torch.cuda.is_available() and "cuda_rng_state_all_before_compute_elbo" in ckpt:
-            torch.cuda.set_rng_state_all(ckpt["cuda_rng_state_all_before_compute_elbo"])
+        if (
+            device.type == "cuda"
+            and torch.cuda.is_available()
+            and "cuda_rng_state_all_before_compute_elbo" in ckpt
+        ):
+            st = _cuda_rng_states_on_device(
+                ckpt["cuda_rng_state_all_before_compute_elbo"],
+                device,
+            )
+            torch.cuda.set_rng_state_all(st)
         return
 
     if "seed" in ckpt:
@@ -136,13 +170,14 @@ def restore_rng_from_checkpoint(ckpt: Dict[str, Any]) -> None:
         torch.manual_seed(s)
         np.random.seed(s)
     if "torch_rng_state" in ckpt:
-        torch.set_rng_state(ckpt["torch_rng_state"])
+        torch.set_rng_state(_torch_cpu_rng_state(ckpt["torch_rng_state"]))
     if "numpy_rng_state" in ckpt:
         np.random.set_state(ckpt["numpy_rng_state"])
     if "python_random_state" in ckpt:
         random.setstate(ckpt["python_random_state"])
-    if torch.cuda.is_available() and "cuda_rng_state_all" in ckpt:
-        torch.cuda.set_rng_state_all(ckpt["cuda_rng_state_all"])
+    if device.type == "cuda" and torch.cuda.is_available() and "cuda_rng_state_all" in ckpt:
+        st = _cuda_rng_states_on_device(ckpt["cuda_rng_state_all"], device)
+        torch.cuda.set_rng_state_all(st)
 
 
 def iter_tensors(obj: Any) -> Iterable[torch.Tensor]:
@@ -372,7 +407,7 @@ def main() -> None:
     seed_use = int(args.manual_seed) if args.manual_seed >= 0 else int(meta.get("seed", ckpt.get("seed", 0)))
     torch.manual_seed(seed_use)
     np.random.seed(seed_use)
-    restore_rng_from_checkpoint(ckpt)
+    restore_rng_from_checkpoint(ckpt, device=device)
 
     lam = float(getattr(ns, "lambda_entropy", ckpt.get("lambda_entropy", 0.0)))
 
