@@ -124,29 +124,26 @@ def _torch_cpu_rng_state(state: Any) -> torch.Tensor:
     return state.detach().cpu()
 
 
-def _cuda_rng_byte_tensor(t: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """CUDA ``set_rng_state`` requires a ``ByteTensor`` on the target CUDA device.
+def _cuda_rng_to_cpu_bytes(t: torch.Tensor) -> torch.Tensor:
+    """Normalize a CUDA RNG state tensor to a CPU ``ByteTensor``.
 
-    ``torch.load(..., map_location=...)`` can leave RNG state tensors on the wrong
-    device or dtype; normalize before ``torch.cuda.set_rng_state_all``.
+    ``torch.cuda.set_rng_state`` / ``set_rng_state_all`` always require a CPU
+    ``ByteTensor`` (``uint8``), even for CUDA generators — the function moves it
+    to the right device internally.  ``torch.load(..., map_location=cuda)`` can
+    corrupt the dtype, so we normalize here regardless.
     """
-    out = t.detach()
+    out = t.detach().cpu()
     if out.dtype != torch.uint8:
         out = out.to(dtype=torch.uint8)
-    return out.to(device=device)
+    return out
 
 
-def _cuda_rng_states_on_device(states: Any, device: torch.device) -> Any:
-    """Place CUDA RNG state tensors on ``device`` as ``uint8`` (ByteTensor)."""
-    if device.type != "cuda":
-        return states
+def _normalize_cuda_rng_states(states: Any) -> Any:
+    """Return CUDA RNG state(s) as CPU ``ByteTensor``(s) for ``set_rng_state_all``."""
     if isinstance(states, (list, tuple)):
-        return [
-            _cuda_rng_byte_tensor(s, device) if torch.is_tensor(s) else s
-            for s in states
-        ]
+        return [_cuda_rng_to_cpu_bytes(s) if torch.is_tensor(s) else s for s in states]
     if torch.is_tensor(states):
-        return _cuda_rng_byte_tensor(states, device)
+        return _cuda_rng_to_cpu_bytes(states)
     return states
 
 
@@ -175,11 +172,9 @@ def restore_rng_from_checkpoint(ckpt: Dict[str, Any], *, device: torch.device) -
             and torch.cuda.is_available()
             and "cuda_rng_state_all_before_compute_elbo" in ckpt
         ):
-            st = _cuda_rng_states_on_device(
-                ckpt["cuda_rng_state_all_before_compute_elbo"],
-                device,
+            torch.cuda.set_rng_state_all(
+                _normalize_cuda_rng_states(ckpt["cuda_rng_state_all_before_compute_elbo"])
             )
-            torch.cuda.set_rng_state_all(st)
         return
 
     if "seed" in ckpt:
@@ -193,8 +188,9 @@ def restore_rng_from_checkpoint(ckpt: Dict[str, Any], *, device: torch.device) -
     if "python_random_state" in ckpt:
         random.setstate(ckpt["python_random_state"])
     if device.type == "cuda" and torch.cuda.is_available() and "cuda_rng_state_all" in ckpt:
-        st = _cuda_rng_states_on_device(ckpt["cuda_rng_state_all"], device)
-        torch.cuda.set_rng_state_all(st)
+        torch.cuda.set_rng_state_all(
+            _normalize_cuda_rng_states(ckpt["cuda_rng_state_all"])
+        )
 
 
 def iter_tensors(obj: Any) -> Iterable[torch.Tensor]:
