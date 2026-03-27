@@ -157,7 +157,9 @@ def restore_rng_from_checkpoint(ckpt: Dict[str, Any], *, device: torch.device) -
     post-``compute_elbo`` keys.
 
     Args:
-        ckpt: Loaded checkpoint dict (may have tensors on GPU from ``map_location``).
+        ckpt: Loaded checkpoint dict. Prefer loading the file with
+            ``map_location=\"cpu\"`` in ``main`` so RNG state tensors keep valid
+            ``ByteTensor`` dtypes.
         device: Replay device; CUDA RNG is restored only when ``device.type == "cuda"``.
     """
     import random
@@ -403,13 +405,18 @@ def main() -> None:
     ns = namespace_from_args_dict(raw_args)
 
     device = torch.device(args.device)
+    # Load on CPU so RNG state tensors stay valid ByteTensors; map_location=cuda
+    # can corrupt uint8 RNG blobs for set_rng_state / set_rng_state_all.
     try:
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     except TypeError:
-        ckpt = torch.load(ckpt_path, map_location=device)
+        ckpt = torch.load(ckpt_path, map_location="cpu")
 
     model = build_model(ns, device)
-    model.load_state_dict(ckpt["model_state_dict"], strict=True)
+    model.load_state_dict(
+        {k: v.to(device) for k, v in ckpt["model_state_dict"].items()},
+        strict=True,
+    )
 
     batch = load_batch(batch_path, device)
     X = batch["X"]
