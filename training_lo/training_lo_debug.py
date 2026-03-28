@@ -39,10 +39,15 @@ def main(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     repo_root = Path(__file__).resolve().parents[1]
     training_dir = repo_root / "training"
+    training_lo_dir = Path(__file__).resolve().parent
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     if str(training_dir) not in sys.path:
         sys.path.insert(0, str(training_dir))
+    if str(training_lo_dir) not in sys.path:
+        sys.path.insert(0, str(training_lo_dir))
+
+    from run_metadata import write_run_metadata_json
 
     from utils import (  # type: ignore[import-not-found]
         worker_init_fn,
@@ -265,6 +270,8 @@ def main(args: argparse.Namespace) -> None:
         args.num_examples_per_epoch = 50
         args.max_protein_length = 1000
         args.batch_size = 1000
+
+    write_run_metadata_json(base_folder, repo_root, args)
 
     train, valid, _test = build_training_clusters(params, args.debug)
     train_set = PDB_dataset(list(train.keys()), loader_pdb, train, params)
