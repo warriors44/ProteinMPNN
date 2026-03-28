@@ -577,7 +577,9 @@ class NoamOpt:
     def zero_grad(self) -> None:
         self.optimizer.zero_grad()
 
-def get_std_opt(parameters: Any, d_model: int, step: int) -> NoamOpt:
+def get_std_opt(parameters: Any, d_model: int, step: int, weight_decay: float = 0.0) -> NoamOpt:
     return NoamOpt(
-        d_model, 2, 4000, torch.optim.Adam(parameters, lr=0, betas=(0.9, 0.98), eps=1e-9), step
+        d_model, 2, 4000,
+        torch.optim.AdamW(parameters, lr=0, betas=(0.9, 0.98), eps=1e-9, weight_decay=weight_decay),
+        step,
     )

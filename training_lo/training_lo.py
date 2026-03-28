@@ -281,7 +281,7 @@ def main(args: argparse.Namespace) -> None:
             with open(base_folder + "init_from_checkpoint_report.json", "w") as f:
                 json.dump(init_log, f, indent=2)
 
-    optimizer = get_std_opt(model.parameters(), args.hidden_dim, total_step)
+    optimizer = get_std_opt(model.parameters(), args.hidden_dim, total_step, weight_decay=args.weight_decay)
     if args.previous_checkpoint:
         optimizer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
@@ -531,6 +531,7 @@ def main(args: argparse.Namespace) -> None:
                         "separate_q_decoder": bool(args.separate_q_decoder),
                         "q_order_temp": float(args.q_order_temp),
                         "p_order_temp": float(args.p_order_temp),
+                        "weight_decay": float(args.weight_decay),
                         "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": optimizer.optimizer.state_dict(),
                     },
@@ -548,6 +549,7 @@ def main(args: argparse.Namespace) -> None:
                     "separate_q_decoder": bool(args.separate_q_decoder),
                     "q_order_temp": float(args.q_order_temp),
                     "p_order_temp": float(args.p_order_temp),
+                    "weight_decay": float(args.weight_decay),
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.optimizer.state_dict(),
                 },
@@ -566,6 +568,7 @@ def main(args: argparse.Namespace) -> None:
                         "separate_q_decoder": bool(args.separate_q_decoder),
                         "q_order_temp": float(args.q_order_temp),
                         "p_order_temp": float(args.p_order_temp),
+                        "weight_decay": float(args.weight_decay),
                         "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": optimizer.optimizer.state_dict(),
                     },
@@ -619,6 +622,7 @@ if __name__ == "__main__":
     argparser.add_argument("--rescut", type=float, default=3.5, help="PDB resolution cutoff.")
     argparser.add_argument("--debug", type=bool, default=False, help="Minimal data loading for debugging.")
     argparser.add_argument("--gradient_norm", type=float, default=1.0, help="Clip gradient norm, negative to disable.")
+    argparser.add_argument("--weight_decay", type=float, default=0.0, help="AdamW decoupled weight decay (0 = disabled).")
     argparser.add_argument("--mixed_precision", type=bool, default=True, help="Train with mixed precision.")
 
     # LO-ARM specific
