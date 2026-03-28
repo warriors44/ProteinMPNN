@@ -251,6 +251,8 @@ def main(args: argparse.Namespace) -> None:
         augment_eps=args.backbone_noise,
         num_samples=args.num_lo_samples,
         separate_q_decoder=bool(args.separate_q_decoder),
+        q_order_temp=float(args.q_order_temp),
+        p_order_temp=float(args.p_order_temp),
     ).to(device)
 
     # Resume from LO checkpoint (full state)
@@ -261,6 +263,10 @@ def main(args: argparse.Namespace) -> None:
         total_step = int(checkpoint.get("step", 0))
         start_epoch = int(checkpoint.get("epoch", 0))
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        if "q_order_temp" in checkpoint:
+            model.q_order_temp = float(checkpoint["q_order_temp"])
+        if "p_order_temp" in checkpoint:
+            model.p_order_temp = float(checkpoint["p_order_temp"])
     else:
         # Initialize from a non-LO ProteinMPNN checkpoint (partial match load).
         if args.init_from_checkpoint:
@@ -523,6 +529,8 @@ def main(args: argparse.Namespace) -> None:
                         "noise_level": args.backbone_noise,
                         "num_samples": args.num_lo_samples,
                         "separate_q_decoder": bool(args.separate_q_decoder),
+                        "q_order_temp": float(args.q_order_temp),
+                        "p_order_temp": float(args.p_order_temp),
                         "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": optimizer.optimizer.state_dict(),
                     },
@@ -538,6 +546,8 @@ def main(args: argparse.Namespace) -> None:
                     "noise_level": args.backbone_noise,
                     "num_samples": args.num_lo_samples,
                     "separate_q_decoder": bool(args.separate_q_decoder),
+                    "q_order_temp": float(args.q_order_temp),
+                    "p_order_temp": float(args.p_order_temp),
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.optimizer.state_dict(),
                 },
@@ -554,6 +564,8 @@ def main(args: argparse.Namespace) -> None:
                         "noise_level": args.backbone_noise,
                         "num_samples": args.num_lo_samples,
                         "separate_q_decoder": bool(args.separate_q_decoder),
+                        "q_order_temp": float(args.q_order_temp),
+                        "p_order_temp": float(args.p_order_temp),
                         "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": optimizer.optimizer.state_dict(),
                     },
@@ -611,6 +623,18 @@ if __name__ == "__main__":
 
     # LO-ARM specific
     argparser.add_argument("--num_lo_samples", type=int, default=2, help="Number of RLOO samples K (>=2).")
+    argparser.add_argument(
+        "--q_order_temp",
+        type=float,
+        default=1.0,
+        help="Divide q order logits by this value (>0). Larger = softer q; 1.0 = no scaling.",
+    )
+    argparser.add_argument(
+        "--p_order_temp",
+        type=float,
+        default=1.0,
+        help="Divide p order logits by this value (>0). Larger = softer p order head; 1.0 = no scaling.",
+    )
     argparser.add_argument("--separate_q_decoder", type=int, default=0, help="0/1: use a separate q decoder.")
     argparser.add_argument("--ca_only", type=int, default=0, help="0/1: CA-only features/model.")
     argparser.add_argument("--seed", type=int, default=0, help="If 0, a random seed is picked.")

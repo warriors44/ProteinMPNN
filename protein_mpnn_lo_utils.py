@@ -121,6 +121,9 @@ class ProteinMPNN_LO(nn.Module):
       - p_theta(x_{z_i} | x_{z_{<i}}, S): token classifier (W_out)
       - p_theta(z_i | z_{<i}, x_{z_{<i}}, S): order-policy prior (W_order_p)
       - q_theta(z_i | z_{<i}, x, S): variational order posterior (W_order_q)
+
+    Order logits for q and p may be temperature-scaled separately via
+    ``q_order_temp`` and ``p_order_temp`` (divide raw logits by temp; default 1.0).
     """
 
     def __init__(
@@ -138,11 +141,17 @@ class ProteinMPNN_LO(nn.Module):
         ca_only: bool = False,
         num_samples: int = 2,
         separate_q_decoder: bool = False,
+        q_order_temp: float = 1.0,
+        p_order_temp: float = 1.0,
     ) -> None:
         super(ProteinMPNN_LO, self).__init__()
 
         if num_samples < 2:
             raise ValueError("num_samples must be >= 2 for RLOO estimator.")
+        if not math.isfinite(q_order_temp) or q_order_temp <= 0.0:
+            raise ValueError("q_order_temp must be finite and > 0.")
+        if not math.isfinite(p_order_temp) or p_order_temp <= 0.0:
+            raise ValueError("p_order_temp must be finite and > 0.")
 
         self.node_features = node_features
         self.edge_features = edge_features
@@ -151,6 +160,10 @@ class ProteinMPNN_LO(nn.Module):
         self.num_samples = num_samples
         self.separate_q_decoder = separate_q_decoder
         self.ca_only = ca_only
+        # Temperature scaling for order logits: effective logits are raw / temp.
+        # Larger temp (>1) yields a softer categorical over positions; 1.0 is identity.
+        self.q_order_temp = float(q_order_temp)
+        self.p_order_temp = float(p_order_temp)
 
         # ---- Featurization ----
         if ca_only:
@@ -364,6 +377,7 @@ class ProteinMPNN_LO(nn.Module):
         q_logits_input = self.W_out_q(h_V)   # [B, L, num_letters]
         q_logits = order_head(q_logits_input.float()).squeeze(-1)
         q_logits = q_logits.masked_fill(design_mask == 0, float('-inf'))
+        q_logits = q_logits / self.q_order_temp
         return q_logits
 
     # ==================================================================
@@ -429,6 +443,7 @@ class ProteinMPNN_LO(nn.Module):
         # detach() prevents order-head gradients from flowing back into W_out;
         # W_out is already trained by the NLL loss which naturally bounds logit scale.
         p_order_logits = self.W_order_p(logits.detach().float()).squeeze(-1)
+        p_order_logits = p_order_logits / self.p_order_temp
         p_order_logits = p_order_logits.masked_fill(design_mask == 0, float('-inf'))
 
         return log_probs, p_order_logits
@@ -883,9 +898,11 @@ class ProteinMPNN_LO(nn.Module):
             if remaining.sum() == 0:
                 break
 
-            # --- Order selection via p_theta ---
+            # --- Order selection via p_theta (same head wiring as forward_p) ---
             h_V_current = h_V_stack[-1]
-            order_logits = self.W_order_p(h_V_current).squeeze(-1)
+            classifier_logits = self.W_out(h_V_current).detach().float()
+            order_logits = self.W_order_p(classifier_logits).squeeze(-1)
+            order_logits = order_logits / self.p_order_temp
             order_logits = order_logits.masked_fill(
                 remaining == 0, float('-inf'),
             )

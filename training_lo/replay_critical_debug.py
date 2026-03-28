@@ -90,6 +90,8 @@ def namespace_from_args_dict(raw: Dict[str, Any]) -> SimpleNamespace:
 
 def build_model(args: SimpleNamespace, device: torch.device) -> ProteinMPNN_LO:
     """Construct ``ProteinMPNN_LO`` the same way as ``training_lo_debug.main``."""
+    q_temp = float(getattr(args, "q_order_temp", 1.0))
+    p_temp = float(getattr(args, "p_order_temp", 1.0))
     return ProteinMPNN_LO(
         ca_only=bool(args.ca_only),
         node_features=args.hidden_dim,
@@ -102,6 +104,8 @@ def build_model(args: SimpleNamespace, device: torch.device) -> ProteinMPNN_LO:
         augment_eps=args.backbone_noise,
         num_samples=args.num_lo_samples,
         separate_q_decoder=bool(args.separate_q_decoder),
+        q_order_temp=q_temp,
+        p_order_temp=p_temp,
     ).to(device)
 
 
@@ -207,11 +211,11 @@ def iter_tensors(obj: Any) -> Iterable[torch.Tensor]:
 def check_finite_tensor(tag: str, t: torch.Tensor) -> bool:
     if t.numel() == 0:
         return True
-    ok = bool(torch.isfinite(t).all().item())
+    n_nan = torch.isnan(t).sum().item()
+    n_pos_inf = torch.isposinf(t).sum().item()
+    ok = (n_nan == 0) and (n_pos_inf == 0)
     if not ok:
-        n_nan = torch.isnan(t).sum().item()
-        n_inf = torch.isinf(t).sum().item()
-        print(f"[NONFINITE] {tag}  shape={tuple(t.shape)}  nan={n_nan}  inf={n_inf}")
+        print(f"[NONFINITE] {tag}  shape={tuple(t.shape)}  nan={n_nan}  +inf={n_pos_inf}")
     else:
         print(f"[ok] {tag}  shape={tuple(t.shape)}  dtype={t.dtype}")
     return ok
@@ -275,14 +279,15 @@ def _make_module_hook(
         for ti, t in enumerate(iter_tensors(out)):
             if not torch.is_tensor(t) or t.numel() == 0:
                 continue
-            if not torch.isfinite(t).all():
+            bad = torch.isnan(t) | torch.isposinf(t)
+            if bad.any():
                 first_hit[0] = f"{name} (tensor index {ti} in output)"
                 if not verbose:
                     return
         if verbose:
             for ti, t in enumerate(iter_tensors(out)):
                 if torch.is_tensor(t) and t.numel() > 0:
-                    finite = bool(torch.isfinite(t).all().item())
+                    finite = bool((~(torch.isnan(t) | torch.isposinf(t))).all().item())
                     print(f"  [hook] {name}  out[{ti}]  finite={finite}  shape={tuple(t.shape)}")
 
     return hook
@@ -407,6 +412,11 @@ def main() -> None:
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     except TypeError:
         ckpt = torch.load(ckpt_path, map_location="cpu")
+
+    if "q_order_temp" in ckpt:
+        ns.q_order_temp = float(ckpt["q_order_temp"])
+    if "p_order_temp" in ckpt:
+        ns.p_order_temp = float(ckpt["p_order_temp"])
 
     model = build_model(ns, device)
     model.load_state_dict(

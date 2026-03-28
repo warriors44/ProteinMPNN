@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pytest
 import torch
 
 from protein_mpnn_lo_utils import ProteinMPNN_LO
@@ -68,6 +69,38 @@ def test_compute_elbo_is_finite_and_backward_works() -> None:
     # Ensure some gradients exist.
     has_grad = any(p.grad is not None for p in model.parameters())
     assert has_grad
+
+
+def test_compute_elbo_with_order_temperatures_backward_works() -> None:
+    """compute_elbo with non-default q/p order temperatures stays finite and trains."""
+    batch = _dummy_batch()
+    model = ProteinMPNN_LO(
+        num_samples=2,
+        q_order_temp=2.0,
+        p_order_temp=1.5,
+    )
+    model.train()
+
+    loss, info = model.compute_elbo(
+        batch["X"],
+        batch["S"],
+        batch["mask"],
+        batch["chain_M"],
+        batch["residue_idx"],
+        batch["chain_encoding_all"],
+    )
+    assert torch.isfinite(loss)
+    assert "elbo" in info
+    loss.backward()
+    assert any(p.grad is not None for p in model.parameters())
+
+
+def test_order_temp_invalid_raises() -> None:
+    """Non-positive or non-finite order temperatures should raise."""
+    with pytest.raises(ValueError, match="q_order_temp"):
+        ProteinMPNN_LO(num_samples=2, q_order_temp=0.0)
+    with pytest.raises(ValueError, match="p_order_temp"):
+        ProteinMPNN_LO(num_samples=2, p_order_temp=-1.0)
 
 
 def test_sample_preserves_fixed_positions_and_returns_order() -> None:

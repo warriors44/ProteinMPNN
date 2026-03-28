@@ -195,6 +195,10 @@ def main(args: argparse.Namespace) -> None:
         k.startswith('q_decoder_layers') for k in checkpoint.get('model_state_dict', {})
     )
     lo_kwargs['separate_q_decoder'] = has_sep_q
+    if 'q_order_temp' in checkpoint:
+        lo_kwargs['q_order_temp'] = float(checkpoint['q_order_temp'])
+    if 'p_order_temp' in checkpoint:
+        lo_kwargs['p_order_temp'] = float(checkpoint['p_order_temp'])
 
     model = ProteinMPNN_LO(
         ca_only=args.ca_only,

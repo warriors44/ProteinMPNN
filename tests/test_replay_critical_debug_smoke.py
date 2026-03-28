@@ -55,6 +55,8 @@ def test_replay_critical_debug_exits_zero(tmp_path: Path) -> None:
         "numpy_rng_state": np.random.get_state(),
         "python_random_state": random.getstate(),
         "lambda_entropy": 0.0,
+        "q_order_temp": 1.0,
+        "p_order_temp": 1.0,
     }
     torch.save(ckpt, tmp_path / f"{stem}.pt")
 
@@ -71,6 +73,8 @@ def test_replay_critical_debug_exits_zero(tmp_path: Path) -> None:
             "separate_q_decoder": 0,
             "ca_only": 0,
             "lambda_entropy": 0.0,
+            "q_order_temp": 1.0,
+            "p_order_temp": 1.0,
         },
     }
     with open(tmp_path / f"{stem}_meta.json", "w") as f:
