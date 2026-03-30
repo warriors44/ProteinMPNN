@@ -145,3 +145,5 @@ training/exp*
 # log
 *.e*
 *.o*
+
+docs
