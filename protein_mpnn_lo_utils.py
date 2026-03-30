@@ -591,6 +591,20 @@ class ProteinMPNN_LO(nn.Module):
             dbg_any_nonfinite_q_logits = (
                 (~torch.isfinite(q_logits)) & design_bool
             ).any().float()
+            # Min/max over designable entries only (after q_order_temp scaling).
+            if bool(design_mask.any().item()):
+                pos_inf = torch.tensor(
+                    float("inf"), device=device, dtype=q_logits.dtype,
+                )
+                neg_inf = torch.tensor(
+                    float("-inf"), device=device, dtype=q_logits.dtype,
+                )
+                dbg_q_logits_min = q_logits.masked_fill(~design_bool, pos_inf).min()
+                dbg_q_logits_max = q_logits.masked_fill(~design_bool, neg_inf).max()
+            else:
+                nan_s = torch.tensor(float("nan"), device=device, dtype=torch.float32)
+                dbg_q_logits_min = nan_s
+                dbg_q_logits_max = nan_s
 
         for _ in range(K):
             full_perm = self._build_fixed_first_perm(
@@ -728,6 +742,8 @@ class ProteinMPNN_LO(nn.Module):
                     "dbg_any_nonfinite_log_probs": dbg_any_bad_log_probs,
                     "dbg_any_nonfinite_p_order_logits": dbg_any_bad_p_order_logits,
                     "dbg_any_nonfinite_q_logits": dbg_any_nonfinite_q_logits,
+                    "dbg_q_logits_min": dbg_q_logits_min,
+                    "dbg_q_logits_max": dbg_q_logits_max,
                     "dbg_loss_isfinite": torch.isfinite(loss).float(),
                 }
             )

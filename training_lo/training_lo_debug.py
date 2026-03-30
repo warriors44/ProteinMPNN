@@ -237,7 +237,8 @@ def main(args: argparse.Namespace) -> None:
         "design_sum_min\tdesign_sum_max\tdesign_zero_count\t"
         "remaining_sum_min\tremaining_sum_max\tremaining_zero_count\t"
         "all_neg_inf_rows_count\t"
-        "any_nonfinite_F\tany_nonfinite_log_q\tany_nonfinite_q_logits\tany_nonfinite_log_probs\tany_nonfinite_p_order_logits\n"
+        "any_nonfinite_F\tany_nonfinite_log_q\tany_nonfinite_q_logits\tany_nonfinite_log_probs\tany_nonfinite_p_order_logits\t"
+        "q_logits_min\tq_logits_max\n"
     )
     if not args.previous_checkpoint:
         with open(nonfinite_logfile, "w") as f:
@@ -684,6 +685,14 @@ def main(args: argparse.Namespace) -> None:
                     info.get("dbg_any_nonfinite_p_order_logits", torch.tensor(float("nan")))
                     .detach().cpu().item(),
                 )
+                q_logits_min = float(
+                    info.get("dbg_q_logits_min", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
+                q_logits_max = float(
+                    info.get("dbg_q_logits_max", torch.tensor(float("nan")))
+                    .detach().cpu().item(),
+                )
 
                 nonfinite_trigger_mask = (
                     (loss_isfinite == 0.0)
@@ -747,7 +756,8 @@ def main(args: argparse.Namespace) -> None:
                         f"{design_sum_min:.0f}\t{design_sum_max:.0f}\t{design_zero_count:.0f}\t"
                         f"{remaining_sum_min:.0f}\t{remaining_sum_max:.0f}\t{remaining_zero_count:.0f}\t"
                         f"{all_neg_inf_rows_count:.0f}\t"
-                        f"{any_nonfinite_F:.0f}\t{any_nonfinite_log_q:.0f}\t{any_nonfinite_q_logits:.0f}\t{any_nonfinite_log_probs:.0f}\t{any_nonfinite_p_order_logits:.0f}\n"
+                        f"{any_nonfinite_F:.0f}\t{any_nonfinite_log_q:.0f}\t{any_nonfinite_q_logits:.0f}\t{any_nonfinite_log_probs:.0f}\t{any_nonfinite_p_order_logits:.0f}\t"
+                        f"{q_logits_min:.6f}\t{q_logits_max:.6f}\n"
                     )
 
                 # Optional step-level debug log (training side only; val fields set to nan).
